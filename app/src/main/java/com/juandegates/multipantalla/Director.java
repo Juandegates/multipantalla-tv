@@ -556,11 +556,11 @@ public final class Director {
             return;
         }
         final List<String> pkgs = new ArrayList<>();
-        final List<Integer> tasks = new ArrayList<>();
+        final List<String> components = new ArrayList<>();
         for (Slot s : slots) {
-            tasks.add(s.taskId);
             if (s.pkg != null && s.running()) {
                 pkgs.add(s.pkg);
+                components.add(s.component);
             }
             s.taskId = -1;
         }
@@ -580,28 +580,10 @@ public final class Director {
             for (String pkg : pkgs) {
                 restoreAudio(pkg);
             }
-            if (backToPanel) {
-                for (String pkg : pkgs) {
-                    exec("am force-stop " + pkg);
-                }
-                resetToFullscreen(pkgs);
-            } else {
-                // Salida silenciosa: cada ventana se agranda a pantalla completa antes de
-                // cerrarla, para que Android recuerde ese tamaño, sin abrir nada encima.
-                IMultiService s = service;
-                for (int i = 0; i < slots.length; i++) {
-                    Integer task = i < tasks.size() ? tasks.get(i) : -1;
-                    if (s != null && task != null && task >= 0) {
-                        try {
-                            s.resizeTask(task, 0, 0, screenW, screenH);
-                        } catch (Exception ignored) {
-                        }
-                    }
-                }
-                for (String pkg : pkgs) {
-                    exec("am force-stop " + pkg);
-                }
+            for (String pkg : pkgs) {
+                exec("am force-stop " + pkg);
             }
+            resetToFullscreen(components, backToPanel);
         });
     }
 
@@ -610,15 +592,33 @@ public final class Director {
      * pequeñas o con un marco raro). Abrirlas un instante en pantalla completa
      * hace que recuerde "pantalla completa".
      */
-    private void resetToFullscreen(List<String> pkgs) {
-        for (String pkg : pkgs) {
-            exec("am start --windowingMode 1 -a android.intent.action.MAIN -c android.intent.category.LEANBACK_LAUNCHER -p "
-                    + pkg + " >/dev/null 2>&1 || am start --windowingMode 1 -a android.intent.action.MAIN "
-                    + "-c android.intent.category.LAUNCHER -p " + pkg + " >/dev/null 2>&1");
-            SystemClock.sleep(1500);
-            exec("am force-stop " + pkg);
+    private void resetToFullscreen(List<String> components, boolean backToPanel) {
+        IMultiService s = service;
+        if (s == null) {
+            return;
         }
-        exec("am start -n " + BuildConfig.APPLICATION_ID + "/.MainActivity");
+        boolean anyVisible = false;
+        for (String component : components) {
+            String r;
+            try {
+                // Se abre por detrás (no se ve) en pantalla completa y se cierra.
+                r = s.launchFullscreen(component, true);
+            } catch (Exception e) {
+                r = "error";
+            }
+            anyVisible |= "visible".equals(r);
+            SystemClock.sleep(1500);
+            ComponentName cn = ComponentName.unflattenFromString(component);
+            if (cn != null) {
+                exec("am force-stop " + cn.getPackageName());
+            }
+        }
+        if (backToPanel) {
+            exec("am start -n " + BuildConfig.APPLICATION_ID + "/.MainActivity");
+        } else if (anyVisible) {
+            // Si alguna se vio, regresar al inicio de la TV.
+            exec("am start -a android.intent.action.MAIN -c android.intent.category.HOME");
+        }
     }
 
     /** Botón de Ayuda: deja todas las apps elegidas abriendo en pantalla completa. */
@@ -627,17 +627,20 @@ public final class Director {
             return;
         }
         final List<String> pkgs = new ArrayList<>();
+        final List<String> components = new ArrayList<>();
         for (Slot s : slots) {
             if (s.pkg != null && !pkgs.contains(s.pkg)) {
                 pkgs.add(s.pkg);
+                components.add(s.component);
             }
         }
         say("Restableciendo pantalla completa…");
         work.execute(() -> {
             for (String pkg : pkgs) {
                 exec(audioAllow(pkg));
+                exec("am force-stop " + pkg);
             }
-            resetToFullscreen(pkgs);
+            resetToFullscreen(components, true);
             say("Listo: esas apps vuelven a abrir en pantalla completa.");
         });
     }

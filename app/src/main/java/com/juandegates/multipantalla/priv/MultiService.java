@@ -267,6 +267,32 @@ public class MultiService extends IMultiService.Stub {
         return "ok:" + task;
     }
 
+    @Override
+    public String launchFullscreen(String component, boolean behind) {
+        ComponentName cn = ComponentName.unflattenFromString(component);
+        if (cn == null) {
+            return "error:componente inválido";
+        }
+        Intent intent = new Intent(Intent.ACTION_MAIN)
+                .setComponent(cn)
+                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+        if (behind) {
+            try {
+                ActivityOptions options = (ActivityOptions) ActivityOptions.class
+                        .getMethod("makeTaskLaunchBehind").invoke(null);
+                ActivityOptions.class.getMethod("setLaunchWindowingMode", int.class).invoke(options, 1);
+                int r = startActivityAsShell(intent, options.toBundle());
+                if (r >= 0) {
+                    return "detras";
+                }
+            } catch (Throwable t) {
+                remember("launchBehind", t);
+            }
+        }
+        String out = exec("am start --windowingMode 1 -n " + cn.flattenToShortString());
+        return out.contains("Error") || out.contains("Exception") ? "error:" + out : "visible";
+    }
+
     private int startActivityAsShell(Intent intent, Bundle options) throws Exception {
         Object am = Class.forName("android.app.ActivityManager").getMethod("getService").invoke(null);
         for (Method m : am.getClass().getMethods()) {

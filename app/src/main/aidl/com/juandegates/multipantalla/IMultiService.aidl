@@ -41,4 +41,8 @@ interface IMultiService {
 
     // Lugar real de una ventana: {izq, arriba, der, abajo} o vacío.
     int[] taskBounds(int taskId) = 12;
+
+    // Abre una app en pantalla completa (si se puede, por detrás de lo que se ve)
+    // para que Android olvide su tamaño de ventana. Devuelve "detras", "visible" o el error.
+    String launchFullscreen(String component, boolean behind) = 13;
 }
