@@ -54,17 +54,21 @@ https://github.com/Juandegates/multipantalla-tv/releases/download/latest/MultiPa
 
 ## Iniciar Shizuku (cada vez que se reinicia la TV)
 
-Desde Termux, con la TV conectada por `adb connect`:
+Una sola vez, crear el atajo en Termux:
 
 ```
-adb shell 'P=$(pm path moe.shizuku.privileged.api | head -1 | cut -d: -f2); S=$(ls $(dirname $P)/lib/*/libshizuku.so 2>/dev/null | head -1); if [ -n "$S" ]; then $S; else sh /storage/emulated/0/Android/data/moe.shizuku.privileged.api/start.sh; fi'
+cat > ~/multipantalla.sh <<'EOS'
+adb connect 192.168.1.70:$1 || exit 1
+adb shell 'P=$(pm path moe.shizuku.privileged.api | head -1 | cut -d: -f2); S=$(ls $(dirname $P)/lib/*/libshizuku.so 2>/dev/null | head -1); if [ -n "$S" ]; then $S; else sh /storage/emulated/0/Android/data/moe.shizuku.privileged.api/start.sh; fi; monkey -p moe.shizuku.privileged.api -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1; sleep 3; am start -n com.juandegates.multipantalla/.MainActivity'
+EOS
 ```
 
-## Créditos
+Cada vez: ver el puerto en *Ajustes > Sistema > Opciones para desarrolladores >
+Depuración inalámbrica* y ejecutar (ejemplo con puerto 42227):
 
-`FakeContext` y `Workarounds` están adaptados de
-[scrcpy](https://github.com/Genymobile/scrcpy) (Apache 2.0).
-La idea del volumen por app viene de
-[NoMixer](https://github.com/0NLyM/AppMixer).
-La llave `keystore/debug.keystore` es solo de pruebas, para que cada APK nuevo
-se instale encima del anterior.
+```
+sh ~/multipantalla.sh 42227
+```
+
+Si dice "failed to connect": *Vincular dispositivo con código de sincronización*
+y `adb pair 192.168.1.70:PUERTO CÓDIGO`, luego repetir el atajo.
