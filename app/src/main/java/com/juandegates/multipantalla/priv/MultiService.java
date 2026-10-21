@@ -1,16 +1,24 @@
 package com.juandegates.multipantalla.priv;
 
+import android.app.ActivityOptions;
+import android.content.ComponentName;
 import android.content.Context;
-import android.hardware.display.DisplayManager;
-import android.hardware.display.VirtualDisplay;
+import android.content.Intent;
+import android.content.pm.ApplicationInfo;
+import android.graphics.Rect;
+import android.media.AudioManager;
+import android.media.AudioPlaybackConfiguration;
+import android.media.session.MediaController;
+import android.media.session.MediaSessionManager;
+import android.media.session.PlaybackState;
 import android.os.Build;
+import android.os.Bundle;
 import android.os.SystemClock;
 import android.util.Log;
 import android.view.InputDevice;
 import android.view.InputEvent;
 import android.view.KeyCharacterMap;
 import android.view.KeyEvent;
-import android.view.Surface;
 
 import com.juandegates.multipantalla.IMultiService;
 
@@ -18,37 +26,37 @@ import org.lsposed.hiddenapibypass.HiddenApiBypass;
 
 import java.io.ByteArrayOutputStream;
 import java.io.InputStream;
-import java.lang.reflect.Constructor;
 import java.lang.reflect.Method;
 import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executors;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.TimeUnit;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 /**
  * Corre en un proceso aparte con permisos de shell (lo arranca Shizuku).
- * Crea las pantallas virtuales, abre apps en ellas y les manda teclas.
+ * Abre apps como ventanas libres, les pasa el control y maneja su audio.
  */
 public class MultiService extends IMultiService.Stub {
 
     private static final String TAG = "MP-Service";
-
-    // Banderas de pantalla virtual (las mismas que usa scrcpy para --new-display).
-    private static final int FLAG_PUBLIC = DisplayManager.VIRTUAL_DISPLAY_FLAG_PUBLIC;
-    private static final int FLAG_PRESENTATION = DisplayManager.VIRTUAL_DISPLAY_FLAG_PRESENTATION;
-    private static final int FLAG_OWN_CONTENT_ONLY = DisplayManager.VIRTUAL_DISPLAY_FLAG_OWN_CONTENT_ONLY;
-    private static final int FLAG_SUPPORTS_TOUCH = 1 << 6;
-    private static final int FLAG_DESTROY_CONTENT_ON_REMOVAL = 1 << 8;
-    private static final int FLAG_TRUSTED = 1 << 10;
-    private static final int FLAG_OWN_DISPLAY_GROUP = 1 << 11;
-    private static final int FLAG_ALWAYS_UNLOCKED = 1 << 12;
-    private static final int FLAG_TOUCH_FEEDBACK_DISABLED = 1 << 13;
-    private static final int FLAG_OWN_FOCUS = 1 << 14;
-    private static final int FLAG_DEVICE_DISPLAY_GROUP = 1 << 15;
+    private static final int WINDOWING_MODE_FREEFORM = 5;
+    private static final int USER_CURRENT = -2;
+    private static final int PLAYER_STATE_STARTED = 2;
 
     private final Context appContext;
-    private final ConcurrentHashMap<Integer, VirtualDisplay> displays = new ConcurrentHashMap<>();
     private volatile String lastError = "";
 
-    private DisplayManager displayManager;
+    // Volumen deseado por uid de app (solo los que no están al 100 %).
+    private final Map<Integer, Float> volumes = new ConcurrentHashMap<>();
+    private final Map<String, Integer> uidCache = new ConcurrentHashMap<>();
+    private final ScheduledExecutorService ticker = Executors.newSingleThreadScheduledExecutor();
+
     private Object inputManager;
     private Method injectMethod;
     private Method setDisplayIdMethod;
@@ -78,91 +86,19 @@ public class MultiService extends IMultiService.Stub {
         } catch (Throwable t) {
             remember("Workarounds", t);
         }
+        // Las apps crean reproductores nuevos (cada video, cada anuncio):
+        // cada segundo se les vuelve a poner el volumen elegido.
+        ticker.scheduleWithFixedDelay(this::reapplyVolumes, 1, 1, TimeUnit.SECONDS);
     }
 
-    // ---------------------------------------------------------------- pantallas
-
-    private DisplayManager displayManager() throws Exception {
-        if (displayManager != null) {
-            return displayManager;
-        }
-        Constructor<DisplayManager> ctor = DisplayManager.class.getDeclaredConstructor(Context.class);
-        ctor.setAccessible(true);
-        Exception firstError = null;
+    private Context ctx() {
         try {
-            displayManager = ctor.newInstance(FakeContext.get());
-            return displayManager;
-        } catch (Exception e) {
-            firstError = e;
-        }
-        if (appContext != null) {
-            displayManager = ctor.newInstance(FakeContext.wrap(appContext));
-            return displayManager;
-        }
-        throw firstError;
-    }
-
-    @Override
-    public int createDisplay(String name, int width, int height, int dpi, Surface surface) {
-        int base = FLAG_PUBLIC | FLAG_PRESENTATION | FLAG_OWN_CONTENT_ONLY
-                | FLAG_SUPPORTS_TOUCH | FLAG_DESTROY_CONTENT_ON_REMOVAL;
-        int trusted = FLAG_TRUSTED | FLAG_OWN_DISPLAY_GROUP | FLAG_ALWAYS_UNLOCKED
-                | FLAG_TOUCH_FEEDBACK_DISABLED;
-        if (Build.VERSION.SDK_INT >= 34) {
-            trusted |= FLAG_OWN_FOCUS | FLAG_DEVICE_DISPLAY_GROUP;
-        }
-
-        // Primero con todas las banderas; si el sistema las rechaza, con menos.
-        int[] attempts = {base | trusted, base | FLAG_TRUSTED | FLAG_OWN_DISPLAY_GROUP, base};
-        StringBuilder errors = new StringBuilder();
-        for (int flags : attempts) {
-            try {
-                VirtualDisplay vd = displayManager().createVirtualDisplay(name, width, height, dpi, surface, flags);
-                if (vd == null || vd.getDisplay() == null) {
-                    errors.append("flags 0x").append(Integer.toHexString(flags)).append(": null\n");
-                    continue;
-                }
-                int id = vd.getDisplay().getDisplayId();
-                displays.put(id, vd);
-                Log.i(TAG, "Pantalla " + id + " creada con flags 0x" + Integer.toHexString(flags));
-                return id;
-            } catch (Throwable t) {
-                errors.append("flags 0x").append(Integer.toHexString(flags)).append(": ")
-                        .append(shortError(t)).append('\n');
+            return FakeContext.get();
+        } catch (Throwable t) {
+            if (appContext != null) {
+                return FakeContext.wrap(appContext);
             }
-        }
-        lastError = "No se pudo crear la pantalla:\n" + errors;
-        Log.e(TAG, lastError);
-        return -1;
-    }
-
-    @Override
-    public void setDisplaySurface(int displayId, Surface surface) {
-        VirtualDisplay vd = displays.get(displayId);
-        if (vd == null) {
-            return;
-        }
-        try {
-            vd.setSurface(surface);
-        } catch (Throwable t) {
-            remember("setDisplaySurface", t);
-        }
-    }
-
-    @Override
-    public void releaseDisplay(int displayId) {
-        VirtualDisplay vd = displays.remove(displayId);
-        if (vd == null) {
-            return;
-        }
-        try {
-            vd.setSurface(null);
-        } catch (Throwable ignored) {
-        }
-        try {
-            vd.release();
-        } catch (Throwable t) {
-            remember("releaseDisplay", t);
+            throw t;
         }
     }
 
@@ -188,11 +124,409 @@ public class MultiService extends IMultiService.Stub {
         byte[] chunk = new byte[4096];
         int n;
         while ((n = in.read(chunk)) != -1) {
-            if (buffer.size() < 64 * 1024) {
+            if (buffer.size() < 128 * 1024) {
                 buffer.write(chunk, 0, n);
             }
         }
         return buffer.toString(StandardCharsets.UTF_8.name()).trim();
+    }
+
+    // ---------------------------------------------------------------- ventanas
+
+    @Override
+    public String launchFreeform(String component, int left, int top, int right, int bottom) {
+        ComponentName cn = ComponentName.unflattenFromString(component);
+        if (cn == null) {
+            return "error:componente inválido " + component;
+        }
+        String pkg = cn.getPackageName();
+        StringBuilder notes = new StringBuilder();
+
+        // 1) Con opciones de arranque: la app nace ya con su tamaño final.
+        try {
+            Intent intent = new Intent(Intent.ACTION_MAIN)
+                    .setComponent(cn)
+                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            ActivityOptions options = ActivityOptions.makeBasic();
+            options.setLaunchBounds(new Rect(left, top, right, bottom));
+            Method setMode = ActivityOptions.class.getMethod("setLaunchWindowingMode", int.class);
+            setMode.invoke(options, WINDOWING_MODE_FREEFORM);
+            int result = startActivityAsShell(intent, options.toBundle());
+            if (result >= 0) {
+                int task = waitForTask(pkg, 4000);
+                if (task >= 0) {
+                    return "ok:" + task;
+                }
+                notes.append("arrancó pero no encontré su ventana; ");
+            } else {
+                notes.append("startActivity=").append(result).append("; ");
+            }
+        } catch (Throwable t) {
+            notes.append("opciones: ").append(shortError(t)).append("; ");
+        }
+
+        // 2) Plan B: el comando "am" y luego ajustar el tamaño.
+        String out = exec("am start --windowingMode " + WINDOWING_MODE_FREEFORM
+                + " -n " + cn.flattenToShortString());
+        if (out.contains("Error") || out.contains("Exception")) {
+            lastError = notes + out;
+            return "error:" + lastError;
+        }
+        int task = waitForTask(pkg, 4000);
+        if (task < 0) {
+            lastError = notes + "no apareció la ventana de " + pkg;
+            return "error:" + lastError;
+        }
+        resizeTask(task, left, top, right, bottom);
+        return "ok:" + task;
+    }
+
+    private int startActivityAsShell(Intent intent, Bundle options) throws Exception {
+        Object am = Class.forName("android.app.ActivityManager").getMethod("getService").invoke(null);
+        for (Method m : am.getClass().getMethods()) {
+            if (m.getName().equals("startActivityAsUserWithFeature") && m.getParameterTypes().length == 12) {
+                Object r = m.invoke(am, null, FakeContext.PACKAGE_NAME, null, intent, null, null, null,
+                        0, 0, null, options, USER_CURRENT);
+                return (Integer) r;
+            }
+        }
+        for (Method m : am.getClass().getMethods()) {
+            if (m.getName().equals("startActivityAsUser") && m.getParameterTypes().length == 11) {
+                Object r = m.invoke(am, null, FakeContext.PACKAGE_NAME, intent, null, null, null,
+                        0, 0, null, options, USER_CURRENT);
+                return (Integer) r;
+            }
+        }
+        throw new NoSuchMethodException("startActivityAsUser");
+    }
+
+    private int waitForTask(String pkg, long timeoutMs) {
+        long end = SystemClock.uptimeMillis() + timeoutMs;
+        while (SystemClock.uptimeMillis() < end) {
+            int id = findTask(pkg);
+            if (id >= 0) {
+                return id;
+            }
+            SystemClock.sleep(250);
+        }
+        return -1;
+    }
+
+    @Override
+    public int findTask(String pkg) {
+        // 1) Lista de tareas del sistema.
+        try {
+            Object atm = Class.forName("android.app.ActivityTaskManager").getMethod("getService").invoke(null);
+            for (Method m : atm.getClass().getMethods()) {
+                if (!m.getName().equals("getTasks")) {
+                    continue;
+                }
+                Class<?>[] types = m.getParameterTypes();
+                Object[] args = new Object[types.length];
+                for (int i = 0; i < types.length; i++) {
+                    if (types[i] == int.class) {
+                        args[i] = i == 0 ? 100 : -1; // maxNum, displayId = todas
+                    } else if (types[i] == boolean.class) {
+                        args[i] = false;
+                    } else {
+                        args[i] = null;
+                    }
+                }
+                List<?> tasks = (List<?>) m.invoke(atm, args);
+                if (tasks == null) {
+                    break;
+                }
+                for (Object info : tasks) {
+                    if (taskBelongsTo(info, pkg)) {
+                        return info.getClass().getField("taskId").getInt(info);
+                    }
+                }
+                break;
+            }
+        } catch (Throwable t) {
+            remember("getTasks", t);
+        }
+        // 2) Plan B: leer el resumen de dumpsys.
+        String dump = exec("dumpsys activity activities | grep -E '\\* Task\\{'");
+        Matcher m = Pattern.compile("#(\\d+) type=standard A=\\d+:" + Pattern.quote(pkg)).matcher(dump);
+        if (m.find()) {
+            return Integer.parseInt(m.group(1));
+        }
+        return -1;
+    }
+
+    private static boolean taskBelongsTo(Object info, String pkg) {
+        for (String field : new String[]{"baseActivity", "topActivity", "realActivity", "origActivity"}) {
+            try {
+                Object value = info.getClass().getField(field).get(info);
+                if (value instanceof ComponentName && pkg.equals(((ComponentName) value).getPackageName())) {
+                    return true;
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+        try {
+            Intent base = (Intent) info.getClass().getField("baseIntent").get(info);
+            if (base != null && base.getComponent() != null
+                    && pkg.equals(base.getComponent().getPackageName())) {
+                return true;
+            }
+        } catch (Throwable ignored) {
+        }
+        return false;
+    }
+
+    @Override
+    public boolean focusTask(int taskId) {
+        try {
+            Object atm = Class.forName("android.app.ActivityTaskManager").getMethod("getService").invoke(null);
+            atm.getClass().getMethod("setFocusedTask", int.class).invoke(atm, taskId);
+            return true;
+        } catch (Throwable t) {
+            remember("setFocusedTask", t);
+        }
+        try {
+            Object atm = Class.forName("android.app.ActivityTaskManager").getMethod("getService").invoke(null);
+            for (Method m : atm.getClass().getMethods()) {
+                if (m.getName().equals("moveTaskToFront")) {
+                    // Firma: (caller, callingPackage, taskId, flags, options).
+                    Class<?>[] types = m.getParameterTypes();
+                    Object[] args = new Object[types.length];
+                    boolean taskIdSet = false;
+                    for (int i = 0; i < types.length; i++) {
+                        if (types[i] == int.class) {
+                            args[i] = taskIdSet ? 0 : taskId;
+                            taskIdSet = true;
+                        } else if (types[i] == String.class) {
+                            args[i] = FakeContext.PACKAGE_NAME;
+                        } else {
+                            args[i] = null;
+                        }
+                    }
+                    m.invoke(atm, args);
+                    return true;
+                }
+            }
+        } catch (Throwable t) {
+            remember("moveTaskToFront", t);
+        }
+        return false;
+    }
+
+    @Override
+    public boolean resizeTask(int taskId, int left, int top, int right, int bottom) {
+        String out = exec("am task resize " + taskId + " " + left + " " + top + " " + right + " " + bottom);
+        if (out.isEmpty()) {
+            return true;
+        }
+        lastError = "resize: " + out;
+        return !(out.contains("Error") || out.contains("Exception"));
+    }
+
+    // ---------------------------------------------------------------- audio
+
+    private int uidOf(String pkg) {
+        Integer cached = uidCache.get(pkg);
+        if (cached != null) {
+            return cached;
+        }
+        int uid = -1;
+        try {
+            ApplicationInfo info = ctx().getPackageManager().getApplicationInfo(pkg, 0);
+            uid = info.uid;
+        } catch (Throwable t) {
+            Matcher m = Pattern.compile("uid:(\\d+)").matcher(exec("cmd package list packages -U " + pkg));
+            if (m.find()) {
+                uid = Integer.parseInt(m.group(1));
+            }
+        }
+        if (uid >= 0) {
+            uidCache.put(pkg, uid);
+        }
+        return uid;
+    }
+
+    private List<AudioPlaybackConfiguration> players() {
+        AudioManager audio = (AudioManager) ctx().getSystemService(Context.AUDIO_SERVICE);
+        List<AudioPlaybackConfiguration> list = audio.getActivePlaybackConfigurations();
+        return list == null ? new ArrayList<>() : list;
+    }
+
+    private static int clientUid(AudioPlaybackConfiguration cfg) {
+        try {
+            return (Integer) AudioPlaybackConfiguration.class.getMethod("getClientUid").invoke(cfg);
+        } catch (Throwable t) {
+            return -1;
+        }
+    }
+
+    private static int playerState(AudioPlaybackConfiguration cfg) {
+        try {
+            return (Integer) AudioPlaybackConfiguration.class.getMethod("getPlayerState").invoke(cfg);
+        } catch (Throwable t) {
+            return -1;
+        }
+    }
+
+    private static Object proxy(AudioPlaybackConfiguration cfg) {
+        try {
+            return AudioPlaybackConfiguration.class.getMethod("getPlayerProxy").invoke(cfg);
+        } catch (Throwable t) {
+            return null;
+        }
+    }
+
+    private static boolean callProxy(Object proxy, String method, Object... args) {
+        if (proxy == null) {
+            return false;
+        }
+        try {
+            if (args.length == 0) {
+                proxy.getClass().getMethod(method).invoke(proxy);
+            } else {
+                proxy.getClass().getMethod(method, float.class).invoke(proxy, args);
+            }
+            return true;
+        } catch (Throwable t) {
+            return false;
+        }
+    }
+
+    @Override
+    public String setAppVolume(String pkg, float volume) {
+        int uid = uidOf(pkg);
+        if (uid < 0) {
+            return "error:sin uid para " + pkg;
+        }
+        float v = Math.max(0f, Math.min(1f, volume));
+        if (v >= 0.999f) {
+            volumes.remove(uid);
+        } else {
+            volumes.put(uid, v);
+        }
+        int applied = 0;
+        int seen = 0;
+        try {
+            for (AudioPlaybackConfiguration cfg : players()) {
+                if (clientUid(cfg) != uid) {
+                    continue;
+                }
+                seen++;
+                if (callProxy(proxy(cfg), "setVolume", v)) {
+                    applied++;
+                }
+            }
+        } catch (Throwable t) {
+            remember("setAppVolume", t);
+            return "error:" + shortError(t);
+        }
+        return "ok:" + applied + "/" + seen;
+    }
+
+    private void reapplyVolumes() {
+        if (volumes.isEmpty()) {
+            return;
+        }
+        try {
+            for (AudioPlaybackConfiguration cfg : players()) {
+                Float v = volumes.get(clientUid(cfg));
+                if (v != null) {
+                    callProxy(proxy(cfg), "setVolume", v);
+                }
+            }
+        } catch (Throwable t) {
+            remember("reapplyVolumes", t);
+        }
+    }
+
+    @Override
+    public String media(String pkg, String action) {
+        // 1) Sesión multimedia de la app: pausa de verdad el video.
+        try {
+            MediaSessionManager msm = (MediaSessionManager) ctx().getSystemService(Context.MEDIA_SESSION_SERVICE);
+            List<MediaController> sessions = msm.getActiveSessions(null);
+            for (MediaController c : sessions) {
+                if (!pkg.equals(c.getPackageName())) {
+                    continue;
+                }
+                PlaybackState state = c.getPlaybackState();
+                boolean playing = state != null && state.getState() == PlaybackState.STATE_PLAYING;
+                boolean play = action.equals("play") || (action.equals("toggle") && !playing);
+                if (play) {
+                    c.getTransportControls().play();
+                } else {
+                    c.getTransportControls().pause();
+                }
+                return "sesion:" + (play ? "play" : "pause");
+            }
+        } catch (Throwable t) {
+            remember("media/sesion", t);
+        }
+        // 2) Plan B: pausar sus reproductores de audio directamente.
+        try {
+            int uid = uidOf(pkg);
+            List<Object> proxies = new ArrayList<>();
+            boolean anyStarted = false;
+            for (AudioPlaybackConfiguration cfg : players()) {
+                if (clientUid(cfg) != uid) {
+                    continue;
+                }
+                Object p = proxy(cfg);
+                if (p != null) {
+                    proxies.add(p);
+                    if (playerState(cfg) == PLAYER_STATE_STARTED) {
+                        anyStarted = true;
+                    }
+                }
+            }
+            if (!proxies.isEmpty()) {
+                boolean play = action.equals("play") || (action.equals("toggle") && !anyStarted);
+                for (Object p : proxies) {
+                    callProxy(p, play ? "start" : "pause");
+                }
+                return "audio:" + (play ? "play" : "pause");
+            }
+        } catch (Throwable t) {
+            remember("media/audio", t);
+        }
+        return "nada";
+    }
+
+    @Override
+    public String audioInfo() {
+        StringBuilder sb = new StringBuilder();
+        try {
+            List<AudioPlaybackConfiguration> list = players();
+            sb.append("Reproductores activos: ").append(list.size()).append('\n');
+            for (AudioPlaybackConfiguration cfg : list) {
+                int uid = clientUid(cfg);
+                String[] pkgs = null;
+                try {
+                    pkgs = ctx().getPackageManager().getPackagesForUid(uid);
+                } catch (Throwable ignored) {
+                }
+                sb.append("· uid ").append(uid)
+                        .append(pkgs != null && pkgs.length > 0 ? " " + pkgs[0] : "")
+                        .append(" estado=").append(playerState(cfg))
+                        .append(proxy(cfg) != null ? " control=sí" : " control=no")
+                        .append('\n');
+            }
+            sb.append("Volúmenes guardados: ").append(volumes).append('\n');
+        } catch (Throwable t) {
+            sb.append("Error: ").append(shortError(t));
+        }
+        try {
+            MediaSessionManager msm = (MediaSessionManager) ctx().getSystemService(Context.MEDIA_SESSION_SERVICE);
+            List<MediaController> sessions = msm.getActiveSessions(null);
+            sb.append("Sesiones multimedia: ");
+            for (MediaController c : sessions) {
+                PlaybackState st = c.getPlaybackState();
+                sb.append(c.getPackageName()).append('(').append(st == null ? "?" : st.getState()).append(") ");
+            }
+        } catch (Throwable t) {
+            sb.append("Sesiones multimedia: no disponibles (").append(shortError(t)).append(')');
+        }
+        return sb.toString();
     }
 
     // ---------------------------------------------------------------- teclas
@@ -237,9 +571,8 @@ public class MultiService extends IMultiService.Stub {
                 remember("injectKey", t);
             }
         }
-        // Plan B: el comando "input", más lento pero casi siempre funciona.
         if (action == KeyEvent.ACTION_UP) {
-            exec("input -d " + displayId + " keyevent " + keyCode);
+            exec("input keyevent " + keyCode);
         }
         return false;
     }
@@ -253,9 +586,13 @@ public class MultiService extends IMultiService.Stub {
 
     @Override
     public void destroy() {
-        for (Integer id : displays.keySet()) {
-            releaseDisplay(id);
+        // Antes de salir, todas las apps vuelven a su volumen normal.
+        try {
+            volumes.replaceAll((uid, v) -> 1f);
+            reapplyVolumes();
+        } catch (Throwable ignored) {
         }
+        ticker.shutdownNow();
         System.exit(0);
     }
 
@@ -275,5 +612,4 @@ public class MultiService extends IMultiService.Stub {
         }
         return msg;
     }
-
 }

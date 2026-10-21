@@ -4,536 +4,464 @@ import android.app.Activity;
 import android.app.AlertDialog;
 import android.content.ComponentName;
 import android.content.Intent;
-import android.content.ServiceConnection;
 import android.content.pm.PackageManager;
 import android.content.pm.ResolveInfo;
 import android.graphics.Color;
 import android.graphics.Typeface;
 import android.graphics.drawable.GradientDrawable;
+import android.graphics.drawable.StateListDrawable;
 import android.os.Bundle;
 import android.os.Handler;
-import android.os.IBinder;
 import android.os.Looper;
 import android.view.Gravity;
 import android.view.KeyEvent;
-import android.view.Surface;
-import android.view.SurfaceHolder;
-import android.view.SurfaceView;
 import android.view.View;
 import android.view.ViewGroup;
+import android.widget.Button;
 import android.widget.FrameLayout;
 import android.widget.LinearLayout;
 import android.widget.ScrollView;
 import android.widget.TextView;
-import android.widget.Toast;
-
-import com.juandegates.multipantalla.priv.MultiService;
 
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 
-import rikka.shizuku.Shizuku;
+/**
+ * Pantalla principal: revisión de requisitos, elección de diseño y apps,
+ * teclas, y el fondo negro que queda detrás de las ventanas.
+ */
+public class MainActivity extends Activity implements Director.Listener {
 
-public class MainActivity extends Activity {
-
-    private static final int SHIZUKU_REQUEST = 7;
-    private static final int CELLS = 4;
-
-    // Tamaño de cada pantalla virtual: 1280x720 a 213 dpi = 960x540 dp,
-    // el mismo espacio que ven las apps en una TV normal.
-    private static final int VD_WIDTH = 1280;
-    private static final int VD_HEIGHT = 720;
-    private static final int VD_DPI = 213;
-
-    private static final int COLOR_IDLE = 0xFF2A2D36;
-    private static final int COLOR_SELECTED = 0xFF2F7DF6;
-    private static final int COLOR_CONTROL = 0xFFF5A524;
+    private static final int COLOR_BG = 0xFF0E1015;
+    private static final int COLOR_CARD = 0xFF171A21;
+    private static final int COLOR_BUTTON = 0xFF2A2D36;
+    private static final int COLOR_FOCUS = 0xFF2F7DF6;
+    private static final int COLOR_OK = 0xFF30A46C;
+    private static final int COLOR_BAD = 0xFFE5484D;
+    private static final int COLOR_WARN = 0xFFF5A524;
 
     private final Handler main = new Handler(Looper.getMainLooper());
-    private final ExecutorService work = Executors.newSingleThreadExecutor();
-    private final ExecutorService keys = Executors.newSingleThreadExecutor();
+    private Director director;
 
-    private final Cell[] cells = new Cell[CELLS];
-    private int selected = 0;
-    private Cell controlling = null;
-
+    private FrameLayout root;
+    private View panel;
+    private View fondo;
+    private TextView fondoHint;
+    private LinearLayout checklist;
+    private LinearLayout config;
     private TextView status;
-    private volatile IMultiService service;
-    private boolean bound;
-
-    // Para saber si "Atrás" se mantuvo presionado en modo control.
-    private long backDownAt;
-    private boolean backLongHandled;
-
-    private final Shizuku.UserServiceArgs serviceArgs = new Shizuku.UserServiceArgs(
-            new ComponentName(BuildConfig.APPLICATION_ID, MultiService.class.getName()))
-            .daemon(false)
-            .processNameSuffix("svc")
-            .debuggable(BuildConfig.DEBUG)
-            .version(BuildConfig.VERSION_CODE);
-
-    // ------------------------------------------------------------------ celdas
-
-    private final class Cell implements SurfaceHolder.Callback {
-        final int index;
-        final FrameLayout frame;
-        final SurfaceView surfaceView;
-        final TextView label;
-        final TextView hint;
-        Surface surface;
-        int displayId = -1;
-        String pkg;
-        String component;
-        String appName;
-        boolean muted;
-        boolean sharedAudio;
-
-        Cell(int index) {
-            this.index = index;
-            frame = new FrameLayout(MainActivity.this);
-            frame.setPadding(dp(3), dp(3), dp(3), dp(3));
-
-            surfaceView = new SurfaceView(MainActivity.this);
-            surfaceView.getHolder().setFixedSize(VD_WIDTH, VD_HEIGHT);
-            surfaceView.getHolder().addCallback(this);
-            surfaceView.setFocusable(false);
-            frame.addView(surfaceView, new FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-
-            hint = new TextView(MainActivity.this);
-            hint.setTextColor(0xFFB8BCC8);
-            hint.setTextSize(18);
-            hint.setGravity(Gravity.CENTER);
-            frame.addView(hint, new FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
-
-            label = new TextView(MainActivity.this);
-            label.setTextColor(Color.WHITE);
-            label.setTextSize(13);
-            label.setTypeface(Typeface.DEFAULT_BOLD);
-            label.setPadding(dp(8), dp(3), dp(8), dp(3));
-            GradientDrawable pill = new GradientDrawable();
-            pill.setColor(0xB0000000);
-            pill.setCornerRadius(dp(10));
-            label.setBackground(pill);
-            FrameLayout.LayoutParams lp = new FrameLayout.LayoutParams(
-                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
-            lp.gravity = Gravity.TOP | Gravity.START;
-            lp.setMargins(dp(8), dp(8), 0, 0);
-            frame.addView(label, lp);
-            refresh();
-        }
-
-        void refresh() {
-            String text = (index + 1) + " · " + (appName == null ? "vacía" : appName);
-            if (muted) {
-                text += "  · silencio";
-            }
-            label.setText(text);
-            if (appName == null) {
-                hint.setVisibility(View.VISIBLE);
-                hint.setText(displayId < 0 ? "Preparando pantalla…" : "OK para elegir una app");
-            } else {
-                hint.setVisibility(View.GONE);
-            }
-            int color = this == controlling ? COLOR_CONTROL
-                    : (index == selected ? COLOR_SELECTED : COLOR_IDLE);
-            frame.setBackgroundColor(color);
-        }
-
-        @Override
-        public void surfaceCreated(SurfaceHolder holder) {
-            surface = holder.getSurface();
-            ensureDisplay(this);
-        }
-
-        @Override
-        public void surfaceChanged(SurfaceHolder holder, int format, int width, int height) {
-        }
-
-        @Override
-        public void surfaceDestroyed(SurfaceHolder holder) {
-            surface = null;
-            final int id = displayId;
-            final IMultiService s = service;
-            if (id >= 0 && s != null) {
-                work.execute(() -> {
-                    try {
-                        s.setDisplaySurface(id, null);
-                    } catch (Exception ignored) {
-                    }
-                });
-            }
-        }
-    }
+    private boolean fondoMode;
+    private String lastSignature = "";
 
     // ------------------------------------------------------------------ ciclo de vida
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
-        buildLayout();
-        Shizuku.addBinderReceivedListenerSticky(binderReceived);
-        Shizuku.addBinderDeadListener(binderDead);
-        Shizuku.addRequestPermissionResultListener(permissionResult);
-        main.postDelayed(() -> {
-            if (!Shizuku.pingBinder()) {
-                showStatus("Shizuku no está activo. Ábrelo y actívalo con el comando de ADB, luego vuelve a abrir MultiPantalla.", false);
-            }
-        }, 1500);
+        director = Director.get(this);
+        buildViews();
+        director.addListener(this);
+        director.tryBind();
+        showPanel();
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        director.tryBind();
+        director.refreshFreeform();
+        render(true);
+    }
+
+    @Override
+    protected void onNewIntent(Intent intent) {
+        super.onNewIntent(intent);
+        // Se abrió desde el menú rápido: mostrar el panel.
+        showPanel();
     }
 
     @Override
     protected void onDestroy() {
-        Shizuku.removeBinderReceivedListener(binderReceived);
-        Shizuku.removeBinderDeadListener(binderDead);
-        Shizuku.removeRequestPermissionResultListener(permissionResult);
-        final IMultiService s = service;
-        if (s != null) {
-            final List<Cell> snapshot = new ArrayList<>();
-            Collections.addAll(snapshot, cells);
-            work.execute(() -> {
-                for (Cell c : snapshot) {
-                    if (c.pkg != null) {
-                        restoreAudio(s, c.pkg);
-                    }
-                    if (c.displayId >= 0) {
-                        try {
-                            s.releaseDisplay(c.displayId);
-                        } catch (Exception ignored) {
-                        }
-                    }
-                }
-                try {
-                    if (bound) {
-                        Shizuku.unbindUserService(serviceArgs, connection, true);
-                    }
-                } catch (Throwable ignored) {
-                }
-            });
-        }
-        work.shutdown();
-        keys.shutdown();
+        director.removeListener(this);
+        TeclasService.setSpy(null);
         super.onDestroy();
     }
 
-    private void buildLayout() {
-        FrameLayout root = new FrameLayout(this);
-        root.setBackgroundColor(0xFF0E1015);
-
-        LinearLayout grid = new LinearLayout(this);
-        grid.setOrientation(LinearLayout.VERTICAL);
-        for (int row = 0; row < 2; row++) {
-            LinearLayout line = new LinearLayout(this);
-            line.setOrientation(LinearLayout.HORIZONTAL);
-            for (int col = 0; col < 2; col++) {
-                int i = row * 2 + col;
-                cells[i] = new Cell(i);
-                line.addView(cells[i].frame, new LinearLayout.LayoutParams(0,
-                        ViewGroup.LayoutParams.MATCH_PARENT, 1f));
-            }
-            grid.addView(line, new LinearLayout.LayoutParams(
-                    ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f));
+    @Override
+    public void onDirectorChanged() {
+        if (!director.sessionActive && fondoMode) {
+            showPanel();
         }
-        root.addView(grid, new FrameLayout.LayoutParams(
+        render(false);
+    }
+
+    // ------------------------------------------------------------------ vistas
+
+    private void buildViews() {
+        root = new FrameLayout(this);
+        root.setBackgroundColor(COLOR_BG);
+
+        // Panel con dos columnas: revisión a la izquierda, configuración a la derecha.
+        LinearLayout columns = new LinearLayout(this);
+        columns.setOrientation(LinearLayout.HORIZONTAL);
+        columns.setPadding(dp(40), dp(28), dp(40), dp(28));
+
+        checklist = new LinearLayout(this);
+        checklist.setOrientation(LinearLayout.VERTICAL);
+        config = new LinearLayout(this);
+        config.setOrientation(LinearLayout.VERTICAL);
+
+        columns.addView(card(checklist), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1f));
+        View gap = new View(this);
+        columns.addView(gap, new LinearLayout.LayoutParams(dp(24), 1));
+        columns.addView(card(config), new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.MATCH_PARENT, 1.15f));
+        panel = columns;
+        root.addView(panel, new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
+
+        // Fondo: lo que queda detrás de las ventanas durante la sesión.
+        FrameLayout f = new FrameLayout(this);
+        f.setBackgroundColor(Color.BLACK);
+        f.setFocusable(true);
+        fondoHint = new TextView(this);
+        fondoHint.setTextColor(0xFF5C6170);
+        fondoHint.setTextSize(16);
+        fondoHint.setGravity(Gravity.CENTER);
+        FrameLayout.LayoutParams hp = new FrameLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        hp.gravity = Gravity.BOTTOM;
+        hp.bottomMargin = dp(18);
+        f.addView(fondoHint, hp);
+        fondo = f;
+        fondo.setVisibility(View.GONE);
+        root.addView(fondo, new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT));
 
         status = new TextView(this);
         status.setTextColor(Color.WHITE);
         status.setTextSize(15);
         status.setPadding(dp(16), dp(10), dp(16), dp(10));
-        GradientDrawable bg = new GradientDrawable();
-        bg.setColor(0xE0101218);
-        bg.setCornerRadius(dp(12));
-        status.setBackground(bg);
+        GradientDrawable sb = new GradientDrawable();
+        sb.setColor(0xE0101218);
+        sb.setCornerRadius(dp(12));
+        sb.setStroke(dp(1), 0xFF2F3340);
+        status.setBackground(sb);
         FrameLayout.LayoutParams slp = new FrameLayout.LayoutParams(
                 ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
         slp.gravity = Gravity.BOTTOM | Gravity.CENTER_HORIZONTAL;
-        slp.bottomMargin = dp(24);
+        slp.bottomMargin = dp(18);
         root.addView(status, slp);
         status.setVisibility(View.GONE);
 
         setContentView(root);
-        showStatus("Flechas: elegir cuadro · OK: abrir app o menú · Menú/OK largo: opciones", true);
     }
 
-    // ------------------------------------------------------------------ Shizuku
-
-    private final Shizuku.OnBinderReceivedListener binderReceived = () -> main.post(this::connectShizuku);
-
-    private final Shizuku.OnBinderDeadListener binderDead = () -> main.post(() -> {
-        service = null;
-        bound = false;
-        showStatus("Shizuku se detuvo. Vuelve a iniciarlo con el comando de ADB.", false);
-    });
-
-    private final Shizuku.OnRequestPermissionResultListener permissionResult = (requestCode, grantResult) ->
-            main.post(() -> {
-                if (grantResult == PackageManager.PERMISSION_GRANTED) {
-                    connectShizuku();
-                } else {
-                    showStatus("Sin el permiso de Shizuku no se pueden crear las pantallas.", false);
-                }
-            });
-
-    private void connectShizuku() {
-        try {
-            if (Shizuku.isPreV11()) {
-                showStatus("Tu versión de Shizuku es muy vieja. Instala la más reciente.", false);
-                return;
-            }
-            if (Shizuku.checkSelfPermission() != PackageManager.PERMISSION_GRANTED) {
-                showStatus("Acepta el permiso de Shizuku en la ventana que aparece.", false);
-                Shizuku.requestPermission(SHIZUKU_REQUEST);
-                return;
-            }
-            if (!bound) {
-                showStatus("Conectando con Shizuku…", false);
-                Shizuku.bindUserService(serviceArgs, connection);
-                bound = true;
-            }
-        } catch (Throwable t) {
-            showStatus("Error con Shizuku: " + t.getMessage(), false);
-        }
+    private View card(LinearLayout content) {
+        ScrollView scroll = new ScrollView(this);
+        scroll.setFillViewport(true);
+        GradientDrawable bg = new GradientDrawable();
+        bg.setColor(COLOR_CARD);
+        bg.setCornerRadius(dp(18));
+        scroll.setBackground(bg);
+        content.setPadding(dp(28), dp(22), dp(28), dp(22));
+        scroll.addView(content);
+        return scroll;
     }
 
-    private final ServiceConnection connection = new ServiceConnection() {
-        @Override
-        public void onServiceConnected(ComponentName name, IBinder binder) {
-            if (binder == null || !binder.pingBinder()) {
-                showStatus("El servicio de Shizuku no respondió.", false);
-                return;
-            }
-            service = IMultiService.Stub.asInterface(binder);
-            showStatus("Listo. Elige un cuadro y presiona OK.", true);
-            for (Cell c : cells) {
-                ensureDisplay(c);
-            }
-        }
-
-        @Override
-        public void onServiceDisconnected(ComponentName name) {
-            service = null;
-            bound = false;
-        }
-    };
-
-    // ------------------------------------------------------------------ pantallas
-
-    private void ensureDisplay(final Cell cell) {
-        final IMultiService s = service;
-        final Surface surface = cell.surface;
-        if (s == null || surface == null || !surface.isValid()) {
-            return;
-        }
-        work.execute(() -> {
-            try {
-                if (cell.displayId >= 0) {
-                    s.setDisplaySurface(cell.displayId, surface);
-                    return;
-                }
-                int id = s.createDisplay("MultiPantalla-" + (cell.index + 1), VD_WIDTH, VD_HEIGHT, VD_DPI, surface);
-                if (id < 0) {
-                    String err = s.lastError();
-                    main.post(() -> showLongText("No se pudo crear la pantalla " + (cell.index + 1), err));
-                    return;
-                }
-                cell.displayId = id;
-                main.post(cell::refresh);
-            } catch (Exception e) {
-                main.post(() -> showStatus("Error al crear pantalla: " + e.getMessage(), false));
-            }
-        });
+    private void showPanel() {
+        fondoMode = false;
+        panel.setVisibility(View.VISIBLE);
+        fondo.setVisibility(View.GONE);
+        render(true);
     }
 
-    // ------------------------------------------------------------------ teclas
+    private void showFondo() {
+        fondoMode = true;
+        panel.setVisibility(View.GONE);
+        fondo.setVisibility(View.VISIBLE);
+        fondoHint.setText("MultiPantalla · " + Director.keyName(director.keyNext) + " / "
+                + Director.keyName(director.keyPrev) + " cambia de ventana · "
+                + Director.keyName(director.keyMenu) + " abre el menú · OK aquí: volver al panel");
+        fondo.requestFocus();
+    }
 
     @Override
     public boolean dispatchKeyEvent(KeyEvent event) {
-        int code = event.getKeyCode();
-        if (code == KeyEvent.KEYCODE_VOLUME_UP || code == KeyEvent.KEYCODE_VOLUME_DOWN
-                || code == KeyEvent.KEYCODE_VOLUME_MUTE || code == KeyEvent.KEYCODE_HOME
-                || code == KeyEvent.KEYCODE_POWER) {
-            return super.dispatchKeyEvent(event);
-        }
-        if (controlling != null) {
-            return handleControlKey(event);
-        }
-        return handleNavigationKey(event);
-    }
-
-    private boolean handleControlKey(KeyEvent event) {
-        final Cell cell = controlling;
-        int code = event.getKeyCode();
-        if (code == KeyEvent.KEYCODE_BACK) {
-            // Atrás corto = Atrás dentro de la app. Atrás largo = salir del control.
-            if (event.getAction() == KeyEvent.ACTION_DOWN) {
-                if (event.getRepeatCount() == 0) {
-                    backDownAt = event.getEventTime();
-                    backLongHandled = false;
-                } else if (!backLongHandled && event.getEventTime() - backDownAt > 600) {
-                    backLongHandled = true;
-                    stopControl();
-                }
-            } else if (event.getAction() == KeyEvent.ACTION_UP && !backLongHandled) {
-                sendKey(cell, KeyEvent.ACTION_DOWN, KeyEvent.KEYCODE_BACK, 0, 0);
-                sendKey(cell, KeyEvent.ACTION_UP, KeyEvent.KEYCODE_BACK, 0, 0);
+        if (fondoMode && event.getAction() == KeyEvent.ACTION_UP) {
+            int code = event.getKeyCode();
+            if (code == KeyEvent.KEYCODE_DPAD_CENTER || code == KeyEvent.KEYCODE_ENTER
+                    || code == KeyEvent.KEYCODE_BACK) {
+                showPanel();
+                return true;
             }
+        }
+        if (fondoMode && event.getKeyCode() == KeyEvent.KEYCODE_BACK) {
             return true;
         }
-        if (event.getAction() == KeyEvent.ACTION_DOWN || event.getAction() == KeyEvent.ACTION_UP) {
-            sendKey(cell, event.getAction(), code, event.getRepeatCount(), event.getMetaState());
-        }
-        return true;
+        return super.dispatchKeyEvent(event);
     }
 
-    private void sendKey(Cell cell, int action, int code, int repeat, int meta) {
-        final IMultiService s = service;
-        final int id = cell.displayId;
-        if (s == null || id < 0) {
+    // ------------------------------------------------------------------ dibujar
+
+    private String signature() {
+        StringBuilder sb = new StringBuilder();
+        sb.append(director.shizukuInstalled()).append(director.shizukuRunning())
+                .append(director.shizukuPermission()).append(director.connected())
+                .append(director.freeform).append(director.keyServiceEnabled())
+                .append(TeclasService.isConnected()).append(director.layout)
+                .append(director.sessionActive).append(director.keyNext).append(director.keyPrev)
+                .append(director.keyMenu);
+        for (Director.Slot s : director.slots) {
+            sb.append('|').append(s.component).append(s.taskId);
+        }
+        return sb.toString();
+    }
+
+    private void render(boolean force) {
+        if (director.message != null && !director.message.isEmpty()) {
+            showStatus(director.message);
+            director.message = "";
+        }
+        String sig = signature();
+        if (!force && sig.equals(lastSignature)) {
             return;
         }
-        keys.execute(() -> {
-            try {
-                s.injectKey(id, action, code, repeat, meta);
-            } catch (Exception ignored) {
-            }
-        });
-    }
-
-    private long okDownAt;
-    private boolean okLongHandled;
-
-    private boolean handleNavigationKey(KeyEvent event) {
-        int code = event.getKeyCode();
-        boolean down = event.getAction() == KeyEvent.ACTION_DOWN;
-        switch (code) {
-            case KeyEvent.KEYCODE_DPAD_LEFT:
-                if (down) moveSelection(selected % 2 == 1 ? selected - 1 : selected);
-                return true;
-            case KeyEvent.KEYCODE_DPAD_RIGHT:
-                if (down) moveSelection(selected % 2 == 0 ? selected + 1 : selected);
-                return true;
-            case KeyEvent.KEYCODE_DPAD_UP:
-                if (down) moveSelection(selected >= 2 ? selected - 2 : selected);
-                return true;
-            case KeyEvent.KEYCODE_DPAD_DOWN:
-                if (down) moveSelection(selected < 2 ? selected + 2 : selected);
-                return true;
-            case KeyEvent.KEYCODE_DPAD_CENTER:
-            case KeyEvent.KEYCODE_ENTER:
-            case KeyEvent.KEYCODE_NUMPAD_ENTER:
-                // OK corto: abrir/controlar. OK largo: menú del cuadro.
-                if (down) {
-                    if (event.getRepeatCount() == 0) {
-                        okDownAt = event.getEventTime();
-                        okLongHandled = false;
-                    } else if (!okLongHandled && event.getEventTime() - okDownAt > 600) {
-                        okLongHandled = true;
-                        showCellMenu(cells[selected]);
+        lastSignature = sig;
+        Object focusedTag = getCurrentFocus() == null ? null : getCurrentFocus().getTag();
+        renderChecklist();
+        renderConfig();
+        if (!fondoMode) {
+            View again = focusedTag == null ? null : root.findViewWithTag(focusedTag);
+            if (again != null && again.isEnabled()) {
+                again.requestFocus();
+            } else {
+                View start = root.findViewWithTag("iniciar");
+                if (start != null && start.isEnabled()) {
+                    start.requestFocus();
+                } else {
+                    View first = root.findViewWithTag("primera_accion");
+                    if (first != null) {
+                        first.requestFocus();
                     }
-                } else if (event.getAction() == KeyEvent.ACTION_UP && !okLongHandled) {
-                    onCellPressed(cells[selected]);
                 }
-                return true;
-            case KeyEvent.KEYCODE_MENU:
-            case KeyEvent.KEYCODE_SETTINGS:
-            case KeyEvent.KEYCODE_INFO:
-                if (down && event.getRepeatCount() == 0) showCellMenu(cells[selected]);
-                return true;
-            case KeyEvent.KEYCODE_BACK:
-                if (event.getAction() == KeyEvent.ACTION_UP) confirmExit();
-                return true;
-            default:
-                return super.dispatchKeyEvent(event);
+            }
         }
     }
 
-    private void moveSelection(int to) {
-        selected = to;
-        for (Cell c : cells) {
-            c.refresh();
+    private void renderChecklist() {
+        checklist.removeAllViews();
+        checklist.addView(title("MultiPantalla"));
+        checklist.addView(small("Versión " + BuildConfig.VERSION_NAME));
+        checklist.addView(header("Revisión"));
+
+        boolean firstAction = true;
+
+        boolean installed = director.shizukuInstalled();
+        checklist.addView(row(installed ? 1 : 0, "Shizuku instalado",
+                installed ? null : "Instálalo desde Termux (ver README del repositorio).", null, null));
+
+        boolean running = director.shizukuRunning();
+        if (installed) {
+            View r = row(running ? 1 : 0, "Shizuku activo",
+                    running ? null : "Inícialo desde Termux con el comando de arranque. Se apaga cada vez que reinicias la TV.",
+                    running ? null : "Abrir Shizuku", running ? null : this::openShizuku);
+            tagFirst(r, firstAction && !running);
+            firstAction &= running;
+            checklist.addView(r);
+        }
+
+        if (running) {
+            boolean perm = director.shizukuPermission();
+            View r = row(perm ? 1 : 0, "Permiso de Shizuku", null,
+                    perm ? null : "Dar permiso", perm ? null : director::requestShizukuPermission);
+            tagFirst(r, firstAction && !perm);
+            firstAction &= perm;
+            checklist.addView(r);
+
+            if (perm) {
+                boolean conn = director.connected();
+                View c = row(conn ? 1 : 2, conn ? "Conectado con permisos de sistema" : "Conectando…", null,
+                        conn ? null : "Reintentar", conn ? null : director::tryBind);
+                checklist.addView(c);
+            }
+        }
+
+        if (director.connected()) {
+            switch (director.freeform) {
+                case ON:
+                    checklist.addView(row(1, "Ventanas libres activas", null, null, null));
+                    break;
+                case NEEDS_REBOOT: {
+                    View r = row(2, "Ventanas libres: falta reiniciar la TV",
+                            "Después de reiniciar, vuelve a iniciar Shizuku desde Termux.",
+                            "Reiniciar TV", this::confirmReboot);
+                    tagFirst(r, firstAction);
+                    firstAction = false;
+                    checklist.addView(r);
+                    break;
+                }
+                case OFF: {
+                    View r = row(0, "Ventanas libres apagadas", "Es el ajuste oculto de Android que permite varias apps a la vez.",
+                            "Activar", director::enableFreeform);
+                    tagFirst(r, firstAction);
+                    firstAction = false;
+                    checklist.addView(r);
+                    break;
+                }
+                default:
+                    checklist.addView(row(2, "Revisando ventanas libres…", null, null, null));
+            }
+
+            boolean keys = director.keyServiceEnabled() && TeclasService.isConnected();
+            View k = row(keys ? 1 : 0, "Servicio de teclas",
+                    keys ? "Escucha " + Director.keyName(director.keyNext) + ", " + Director.keyName(director.keyPrev)
+                            + " y " + Director.keyName(director.keyMenu) + " en cualquier app."
+                            : "Permite cambiar de ventana y abrir el menú con el control.",
+                    keys ? null : "Activar", keys ? null : director::enableKeyService);
+            tagFirst(k, firstAction && !keys);
+            checklist.addView(k);
+        }
+
+        checklist.addView(header("Ayuda"));
+        Button diag = button("Diagnóstico", this::showDiagnostics);
+        diag.setTag("diag");
+        checklist.addView(diag, buttonParams());
+    }
+
+    private void tagFirst(View row, boolean isFirst) {
+        if (!isFirst) {
+            return;
+        }
+        View b = row.findViewWithTag("accion");
+        if (b != null) {
+            b.setTag("primera_accion");
         }
     }
 
-    private void startControl(Cell cell) {
-        controlling = cell;
-        for (Cell c : cells) {
-            c.refresh();
-        }
-        showStatus("Controlando cuadro " + (cell.index + 1) + " · mantén ATRÁS para salir", true);
-    }
+    private void renderConfig() {
+        config.removeAllViews();
+        config.addView(header("Diseño"));
+        Button layoutBtn = button("◀  " + Layouts.NAMES[director.layout] + "  ▶   (OK cambia)",
+                () -> director.setLayout((director.layout + 1) % Layouts.count()));
+        layoutBtn.setTag("layout");
+        config.addView(layoutBtn, buttonParams());
 
-    private void stopControl() {
-        controlling = null;
-        for (Cell c : cells) {
-            c.refresh();
+        config.addView(header("Apps"));
+        int count = Layouts.slots(director.layout);
+        for (int i = 0; i < count; i++) {
+            final int index = i;
+            Director.Slot s = director.slots[i];
+            String text = "Cuadro " + (i + 1) + ":  " + (s.hasApp() ? s.name : "vacío");
+            if (director.sessionActive) {
+                text += s.running() ? "   · abierta" : "   · cerrada";
+            }
+            Button b = button(text, () -> pickApp(index));
+            b.setTag("slot" + i);
+            config.addView(b, buttonParams());
         }
-        showStatus("Flechas: elegir cuadro · OK: controlar · OK largo: opciones", true);
+
+        config.addView(header("Teclas"));
+        config.addView(small("Siguiente ventana: " + Director.keyName(director.keyNext)
+                + "   ·   Anterior: " + Director.keyName(director.keyPrev)
+                + "   ·   Menú: " + Director.keyName(director.keyMenu)));
+        LinearLayout keyRow = new LinearLayout(this);
+        keyRow.setOrientation(LinearLayout.HORIZONTAL);
+        Button test = button("Probar teclas", this::keyTester);
+        test.setTag("probar");
+        Button assign = button("Asignar teclas", this::assignKeys);
+        assign.setTag("asignar");
+        keyRow.addView(test, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        View sp = new View(this);
+        keyRow.addView(sp, new LinearLayout.LayoutParams(dp(12), 1));
+        keyRow.addView(assign, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+        LinearLayout.LayoutParams krp = buttonParams();
+        config.addView(keyRow, krp);
+
+        View space = new View(this);
+        config.addView(space, new LinearLayout.LayoutParams(1, dp(18)));
+
+        boolean anyApp = false;
+        for (int i = 0; i < count; i++) {
+            anyApp |= director.slots[i].hasApp();
+        }
+        Button start = button(director.sessionActive ? "▶  Volver a abrir todo" : "▶  Iniciar", this::startSession);
+        start.setTag("iniciar");
+        start.setTextSize(20);
+        start.setEnabled(director.ready() && anyApp);
+        start.setAlpha(start.isEnabled() ? 1f : 0.45f);
+        config.addView(start, buttonParams());
+        if (!director.ready()) {
+            config.addView(small("Completa la revisión de la izquierda para iniciar."));
+        } else if (!anyApp) {
+            config.addView(small("Elige al menos una app."));
+        }
+
+        if (director.sessionActive) {
+            Button back = button("Volver a las ventanas", () -> {
+                showFondo();
+                director.raiseAll();
+            });
+            back.setTag("volver");
+            config.addView(back, buttonParams());
+            Button stop = button("Cerrar todas las ventanas", director::stopSession);
+            stop.setTag("cerrar");
+            config.addView(stop, buttonParams());
+        }
     }
 
     // ------------------------------------------------------------------ acciones
 
-    private void onCellPressed(Cell cell) {
-        if (service == null) {
-            showStatus("Todavía no hay conexión con Shizuku.", false);
-            return;
+    private void startSession() {
+        showFondo();
+        director.startSession();
+    }
+
+    private void openShizuku() {
+        PackageManager pm = getPackageManager();
+        Intent intent = pm.getLeanbackLaunchIntentForPackage(Director.SHIZUKU_PACKAGE);
+        if (intent == null) {
+            intent = pm.getLaunchIntentForPackage(Director.SHIZUKU_PACKAGE);
         }
-        if (cell.displayId < 0) {
-            showStatus("El cuadro " + (cell.index + 1) + " aún no tiene pantalla.", false);
-            ensureDisplay(cell);
-            return;
-        }
-        if (cell.pkg == null) {
-            pickApp(cell);
-        } else {
-            startControl(cell);
+        if (intent != null) {
+            startActivity(intent);
         }
     }
 
-    private void showCellMenu(final Cell cell) {
-        final List<String> items = new ArrayList<>();
-        final List<Runnable> actions = new ArrayList<>();
-        if (cell.pkg != null) {
-            items.add("Controlar " + cell.appName);
-            actions.add(() -> startControl(cell));
-            items.add(cell.muted ? "Activar sonido" : "Silenciar");
-            actions.add(() -> setMuted(cell, !cell.muted));
-            items.add(cell.sharedAudio ? "Dejar que pause a las demás (normal)"
-                    : "Que no pause a las demás (experimental)");
-            actions.add(() -> setSharedAudio(cell, !cell.sharedAudio));
-            items.add("Cambiar app");
-            actions.add(() -> pickApp(cell));
-            items.add("Cerrar app");
-            actions.add(() -> closeApp(cell));
-        } else {
-            items.add("Elegir app");
-            actions.add(() -> pickApp(cell));
-        }
-        items.add("Diagnóstico");
-        actions.add(this::showDiagnostics);
-        items.add("Salir de MultiPantalla");
-        actions.add(this::finish);
-
+    private void confirmReboot() {
         new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                .setTitle("Cuadro " + (cell.index + 1))
-                .setItems(items.toArray(new String[0]), (d, which) -> actions.get(which).run())
+                .setTitle("¿Reiniciar la TV?")
+                .setMessage("Al volver a encender, inicia Shizuku desde Termux y abre MultiPantalla.")
+                .setPositiveButton("Reiniciar", (d, w) -> director.rebootTv())
+                .setNegativeButton("Cancelar", null)
                 .show();
     }
 
-    private void pickApp(final Cell cell) {
+    private void pickApp(final int slot) {
         final Map<String, ComponentName> apps = listApps();
-        final List<String> names = new ArrayList<>(apps.keySet());
+        final List<String> names = new ArrayList<>();
+        names.add("(Dejar vacío)");
+        names.addAll(apps.keySet());
         new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                .setTitle("App para el cuadro " + (cell.index + 1))
+                .setTitle("App para el cuadro " + (slot + 1))
                 .setItems(names.toArray(new String[0]), (d, which) -> {
+                    if (which == 0) {
+                        director.setSlotApp(slot, null, null);
+                        return;
+                    }
                     String name = names.get(which);
-                    launchInCell(cell, name, apps.get(name));
+                    ComponentName cn = apps.get(name);
+                    for (int i = 0; i < director.slots.length; i++) {
+                        Director.Slot other = director.slots[i];
+                        if (i != slot && cn != null && cn.getPackageName().equals(other.pkg)
+                                && i < Layouts.slots(director.layout)) {
+                            showStatus(name + " ya está en el cuadro " + (i + 1)
+                                    + ". Android solo deja abrir una ventana por app.");
+                            return;
+                        }
+                    }
+                    director.setSlotApp(slot, cn, name);
                 })
                 .show();
     }
@@ -545,12 +473,11 @@ public class MainActivity extends Activity {
                 .addCategory(Intent.CATEGORY_LEANBACK_LAUNCHER), 0));
         found.addAll(pm.queryIntentActivities(new Intent(Intent.ACTION_MAIN)
                 .addCategory(Intent.CATEGORY_LAUNCHER), 0));
-
         Map<String, ComponentName> byPackage = new LinkedHashMap<>();
         Map<String, String> labels = new LinkedHashMap<>();
         for (ResolveInfo ri : found) {
             String pkg = ri.activityInfo.packageName;
-            if (pkg.equals(getPackageName()) || byPackage.containsKey(pkg)) {
+            if (pkg.equals(getPackageName()) || pkg.equals(Director.SHIZUKU_PACKAGE) || byPackage.containsKey(pkg)) {
                 continue;
             }
             byPackage.put(pkg, new ComponentName(pkg, ri.activityInfo.name));
@@ -569,192 +496,235 @@ public class MainActivity extends Activity {
         return result;
     }
 
-    private void launchInCell(final Cell cell, final String name, final ComponentName component) {
-        if (component == null) {
-            return;
-        }
-        for (Cell other : cells) {
-            if (other != cell && component.getPackageName().equals(other.pkg)) {
-                Toast.makeText(this, name + " ya está en el cuadro " + (other.index + 1)
-                        + ". Android solo deja abrir una copia de cada app.", Toast.LENGTH_LONG).show();
-                return;
+    // ------------------------------------------------------------------ teclas
+
+    private void keyTester() {
+        final TextView tv = new TextView(this);
+        tv.setTextSize(18);
+        tv.setPadding(dp(24), dp(16), dp(24), dp(16));
+        tv.setText("Presiona cualquier botón del control.\n\n"
+                + (TeclasService.isConnected() ? "" : "Aviso: el servicio de teclas no está activo; "
+                + "solo verás las teclas que llegan a esta pantalla.\n"));
+        final String[] last = {"", ""};
+        final Runnable refresh = () -> tv.setText("Presiona cualquier botón del control.\n\n"
+                + "Servicio de teclas (funciona en cualquier app):\n   " + (last[0].isEmpty() ? "—" : last[0])
+                + "\n\nEsta pantalla:\n   " + (last[1].isEmpty() ? "—" : last[1])
+                + "\n\nSi una tecla no aparece en el servicio, la TV se la queda y no sirve para cambiar de ventana.\n"
+                + "Mantén Atrás para salir.");
+        refresh.run();
+        TeclasService.setSpy(event -> {
+            if (event.getAction() == KeyEvent.ACTION_DOWN) {
+                last[0] = Director.keyName(event.getKeyCode()) + "  (" + event.getKeyCode() + ")";
+                main.post(refresh);
             }
-        }
-        final IMultiService s = service;
-        final int id = cell.displayId;
-        if (s == null || id < 0) {
-            return;
-        }
-        final String previous = cell.pkg;
-        showStatus("Abriendo " + name + " en el cuadro " + (cell.index + 1) + "…", false);
-        work.execute(() -> {
-            try {
-                if (previous != null && !previous.equals(component.getPackageName())) {
-                    restoreAudio(s, previous);
-                    s.exec("am force-stop " + previous);
+            return false;
+        });
+        final AlertDialog dialog = new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                .setTitle("Probador de teclas")
+                .setView(tv)
+                .create();
+        final long[] backDown = {0};
+        dialog.setOnKeyListener((d, code, event) -> {
+            if (event.getAction() == KeyEvent.ACTION_DOWN) {
+                last[1] = Director.keyName(code) + "  (" + code + ")";
+                refresh.run();
+                if (code == KeyEvent.KEYCODE_BACK && event.getRepeatCount() == 0) {
+                    backDown[0] = event.getEventTime();
                 }
-                // Cerrarla primero obliga a Android a abrirla en esta pantalla
-                // y no en la principal.
-                s.exec("am force-stop " + component.getPackageName());
-                String out = s.exec("am start --display " + id + " -n "
-                        + component.flattenToShortString() + " -f 0x10000000");
-                boolean failed = out.contains("Error") || out.contains("Exception");
-                main.post(() -> {
-                    if (failed) {
-                        showLongText("No se pudo abrir " + name, out);
-                        return;
-                    }
-                    cell.pkg = component.getPackageName();
-                    cell.component = component.flattenToShortString();
-                    cell.appName = name;
-                    cell.muted = false;
-                    cell.sharedAudio = false;
-                    cell.refresh();
-                    showStatus(name + " abierta en el cuadro " + (cell.index + 1)
-                            + ". OK para controlarla.", true);
-                });
-            } catch (Exception e) {
-                main.post(() -> showStatus("Error al abrir: " + e.getMessage(), false));
-            }
-        });
-    }
-
-    private void setMuted(final Cell cell, final boolean mute) {
-        final IMultiService s = service;
-        if (s == null || cell.pkg == null) {
-            return;
-        }
-        final String pkg = cell.pkg;
-        work.execute(() -> {
-            try {
-                s.exec("cmd appops set " + pkg + " PLAY_AUDIO " + (mute ? "deny" : "allow"));
-                main.post(() -> {
-                    cell.muted = mute;
-                    cell.refresh();
-                    showStatus(cell.appName + (mute ? " silenciada" : " con sonido"), true);
-                });
-            } catch (Exception e) {
-                main.post(() -> showStatus("No se pudo cambiar el sonido: " + e.getMessage(), false));
-            }
-        });
-    }
-
-    private void setSharedAudio(final Cell cell, final boolean shared) {
-        final IMultiService s = service;
-        if (s == null || cell.pkg == null) {
-            return;
-        }
-        final String pkg = cell.pkg;
-        work.execute(() -> {
-            try {
-                s.exec("cmd appops set " + pkg + " TAKE_AUDIO_FOCUS " + (shared ? "ignore" : "default"));
-                main.post(() -> {
-                    cell.sharedAudio = shared;
-                    showStatus(shared
-                            ? cell.appName + " ya no pedirá el audio solo para ella. Si deja de reproducir, regrésalo a normal."
-                            : cell.appName + " vuelve al audio normal.", true);
-                });
-            } catch (Exception e) {
-                main.post(() -> showStatus("No se pudo cambiar: " + e.getMessage(), false));
-            }
-        });
-    }
-
-    private void closeApp(final Cell cell) {
-        final IMultiService s = service;
-        if (s == null || cell.pkg == null) {
-            return;
-        }
-        final String pkg = cell.pkg;
-        work.execute(() -> {
-            try {
-                restoreAudio(s, pkg);
-                s.exec("am force-stop " + pkg);
-            } catch (Exception ignored) {
-            }
-            main.post(() -> {
-                cell.pkg = null;
-                cell.component = null;
-                cell.appName = null;
-                cell.muted = false;
-                cell.sharedAudio = false;
-                if (controlling == cell) {
-                    controlling = null;
+                if (code == KeyEvent.KEYCODE_BACK && event.getEventTime() - backDown[0] > 600) {
+                    d.dismiss();
                 }
-                cell.refresh();
-            });
+            }
+            return code != KeyEvent.KEYCODE_BACK || event.getAction() == KeyEvent.ACTION_UP;
         });
+        dialog.setOnDismissListener(d -> TeclasService.setSpy(null));
+        dialog.show();
     }
 
-    private static void restoreAudio(IMultiService s, String pkg) {
-        try {
-            s.exec("cmd appops set " + pkg + " PLAY_AUDIO default; cmd appops set " + pkg + " TAKE_AUDIO_FOCUS default");
-        } catch (Exception ignored) {
-        }
+    private void assignKeys() {
+        final String[] steps = {"SIGUIENTE ventana", "ventana ANTERIOR", "abrir el MENÚ rápido"};
+        final int[] chosen = new int[3];
+        final int[] step = {0};
+        final TextView tv = new TextView(this);
+        tv.setTextSize(20);
+        tv.setPadding(dp(24), dp(20), dp(24), dp(20));
+        final AlertDialog dialog = new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                .setTitle("Asignar teclas")
+                .setView(tv)
+                .setNegativeButton("Cancelar", null)
+                .create();
+        final Runnable refresh = () -> tv.setText("Presiona el botón para:\n\n   " + steps[step[0]]
+                + "\n\nNo uses flechas, OK, Atrás, Inicio ni volumen.");
+        refresh.run();
+
+        final java.util.function.IntPredicate accept = code -> {
+            if (code == KeyEvent.KEYCODE_DPAD_UP || code == KeyEvent.KEYCODE_DPAD_DOWN
+                    || code == KeyEvent.KEYCODE_DPAD_LEFT || code == KeyEvent.KEYCODE_DPAD_RIGHT
+                    || code == KeyEvent.KEYCODE_DPAD_CENTER || code == KeyEvent.KEYCODE_ENTER
+                    || code == KeyEvent.KEYCODE_BACK || code == KeyEvent.KEYCODE_HOME
+                    || code == KeyEvent.KEYCODE_VOLUME_UP || code == KeyEvent.KEYCODE_VOLUME_DOWN
+                    || code == KeyEvent.KEYCODE_VOLUME_MUTE || code == KeyEvent.KEYCODE_POWER) {
+                return false;
+            }
+            for (int k = 0; k < step[0]; k++) {
+                if (chosen[k] == code) {
+                    return false;
+                }
+            }
+            chosen[step[0]] = code;
+            step[0]++;
+            if (step[0] >= steps.length) {
+                main.post(() -> {
+                    director.setKeys(chosen[0], chosen[1], chosen[2]);
+                    showStatus("Teclas guardadas.");
+                    dialog.dismiss();
+                });
+            } else {
+                main.post(refresh);
+            }
+            return true;
+        };
+        // Primero escucha el servicio de teclas (así se asignan teclas que sí llegan en cualquier app).
+        TeclasService.setSpy(event -> event.getAction() == KeyEvent.ACTION_DOWN
+                && event.getRepeatCount() == 0 && accept.test(event.getKeyCode()));
+        dialog.setOnKeyListener((d, code, event) -> !TeclasService.isConnected()
+                && event.getAction() == KeyEvent.ACTION_DOWN && event.getRepeatCount() == 0
+                && accept.test(code));
+        dialog.setOnDismissListener(d -> TeclasService.setSpy(null));
+        dialog.show();
     }
+
+    // ------------------------------------------------------------------ diagnóstico
 
     private void showDiagnostics() {
-        final IMultiService s = service;
-        if (s == null) {
-            showLongText("Diagnóstico", "Sin conexión con Shizuku.\nShizuku activo: " + Shizuku.pingBinder());
-            return;
-        }
-        work.execute(() -> {
-            String text;
-            try {
-                StringBuilder sb = new StringBuilder();
-                sb.append("Versión: ").append(BuildConfig.VERSION_NAME).append('\n');
-                sb.append("uid del servicio: ").append(s.exec("id -u")).append('\n');
-                for (Cell c : cells) {
-                    sb.append("Cuadro ").append(c.index + 1).append(": pantalla ").append(c.displayId)
-                            .append(c.pkg != null ? " · " + c.pkg : "").append('\n');
-                }
-                sb.append("Último error: ").append(s.lastError()).append("\n\n");
-                sb.append(s.exec("dumpsys activity activities | grep -E 'Display #|ResumedActivity:'"));
-                text = sb.toString();
-            } catch (Exception e) {
-                text = "Error: " + e.getMessage();
-            }
-            final String result = text;
-            main.post(() -> showLongText("Diagnóstico", result));
+        director.diagnostics(text -> {
+            TextView tv = new TextView(this);
+            tv.setText(text);
+            tv.setTextSize(13);
+            tv.setPadding(dp(20), dp(12), dp(20), dp(12));
+            tv.setFocusable(true);
+            ScrollView scroll = new ScrollView(this);
+            scroll.addView(tv);
+            new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                    .setTitle("Diagnóstico")
+                    .setView(scroll)
+                    .setPositiveButton("OK", null)
+                    .show();
         });
     }
 
-    private void confirmExit() {
-        new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                .setTitle("¿Salir de MultiPantalla?")
-                .setMessage("Se cerrarán las apps de los cuadros.")
-                .setPositiveButton("Salir", (d, w) -> finish())
-                .setNegativeButton("Cancelar", null)
-                .show();
+    // ------------------------------------------------------------------ piezas de interfaz
+
+    private TextView title(String text) {
+        TextView tv = new TextView(this);
+        tv.setText(text);
+        tv.setTextColor(Color.WHITE);
+        tv.setTextSize(30);
+        tv.setTypeface(Typeface.DEFAULT_BOLD);
+        return tv;
     }
 
-    // ------------------------------------------------------------------ utilidades
+    private TextView header(String text) {
+        TextView tv = new TextView(this);
+        tv.setText(text.toUpperCase());
+        tv.setTextColor(0xFF8B90A0);
+        tv.setTextSize(13);
+        tv.setTypeface(Typeface.DEFAULT_BOLD);
+        tv.setLetterSpacing(0.08f);
+        tv.setPadding(0, dp(20), 0, dp(8));
+        return tv;
+    }
+
+    private TextView small(String text) {
+        TextView tv = new TextView(this);
+        tv.setText(text);
+        tv.setTextColor(0xFF9EA3B0);
+        tv.setTextSize(14);
+        tv.setPadding(0, dp(2), 0, dp(4));
+        return tv;
+    }
+
+    /** Fila de la revisión: estado (1 = bien, 0 = falta, 2 = pendiente), texto y botón opcional. */
+    private View row(int state, String text, String detail, String action, Runnable onAction) {
+        LinearLayout line = new LinearLayout(this);
+        line.setOrientation(LinearLayout.HORIZONTAL);
+        line.setGravity(Gravity.CENTER_VERTICAL);
+        line.setPadding(0, dp(6), 0, dp(6));
+
+        TextView mark = new TextView(this);
+        mark.setText(state == 1 ? "✓" : state == 0 ? "✕" : "…");
+        mark.setTextSize(20);
+        mark.setTypeface(Typeface.DEFAULT_BOLD);
+        mark.setGravity(Gravity.CENTER);
+        mark.setTextColor(state == 1 ? COLOR_OK : state == 0 ? COLOR_BAD : COLOR_WARN);
+        line.addView(mark, new LinearLayout.LayoutParams(dp(34), ViewGroup.LayoutParams.WRAP_CONTENT));
+
+        LinearLayout texts = new LinearLayout(this);
+        texts.setOrientation(LinearLayout.VERTICAL);
+        TextView label = new TextView(this);
+        label.setText(text);
+        label.setTextColor(Color.WHITE);
+        label.setTextSize(17);
+        texts.addView(label);
+        if (detail != null) {
+            TextView d = small(detail);
+            texts.addView(d);
+        }
+        line.addView(texts, new LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f));
+
+        if (action != null && onAction != null) {
+            Button b = button(action, onAction);
+            b.setTag("accion");
+            b.setTextSize(15);
+            LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                    ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+            lp.leftMargin = dp(12);
+            line.addView(b, lp);
+        }
+        return line;
+    }
+
+    private Button button(String text, Runnable onClick) {
+        Button b = new Button(this);
+        b.setText(text);
+        b.setAllCaps(false);
+        b.setTextColor(Color.WHITE);
+        b.setTextSize(17);
+        b.setGravity(Gravity.CENTER_VERTICAL | Gravity.START);
+        b.setPadding(dp(18), dp(10), dp(18), dp(10));
+        b.setFocusable(true);
+        StateListDrawable states = new StateListDrawable();
+        states.addState(new int[]{android.R.attr.state_focused}, rounded(COLOR_FOCUS));
+        states.addState(new int[]{android.R.attr.state_pressed}, rounded(COLOR_FOCUS));
+        states.addState(new int[]{}, rounded(COLOR_BUTTON));
+        b.setBackground(states);
+        b.setStateListAnimator(null);
+        b.setOnClickListener(v -> onClick.run());
+        return b;
+    }
+
+    private GradientDrawable rounded(int color) {
+        GradientDrawable g = new GradientDrawable();
+        g.setColor(color);
+        g.setCornerRadius(dp(10));
+        return g;
+    }
+
+    private LinearLayout.LayoutParams buttonParams() {
+        LinearLayout.LayoutParams lp = new LinearLayout.LayoutParams(
+                ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT);
+        lp.topMargin = dp(6);
+        lp.bottomMargin = dp(6);
+        return lp;
+    }
 
     private final Runnable hideStatus = () -> status.setVisibility(View.GONE);
 
-    private void showStatus(String text, boolean autoHide) {
+    private void showStatus(String text) {
         status.setText(text);
         status.setVisibility(View.VISIBLE);
         main.removeCallbacks(hideStatus);
-        if (autoHide) {
-            main.postDelayed(hideStatus, 6000);
-        }
-    }
-
-    private void showLongText(String title, String text) {
-        TextView tv = new TextView(this);
-        tv.setText(text);
-        tv.setTextSize(14);
-        tv.setTextIsSelectable(false);
-        tv.setPadding(dp(20), dp(12), dp(20), dp(12));
-        ScrollView scroll = new ScrollView(this);
-        scroll.addView(tv);
-        new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
-                .setTitle(title)
-                .setView(scroll)
-                .setPositiveButton("OK", null)
-                .show();
+        main.postDelayed(hideStatus, 7000);
     }
 
     private int dp(int value) {

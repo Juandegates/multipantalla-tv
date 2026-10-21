@@ -1,4 +1,6 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name">MultiPantalla</string>
+    <string name="teclas_nombre">MultiPantalla · teclas</string>
+    <string name="teclas_desc">Permite cambiar de ventana y abrir el menú de MultiPantalla con el control remoto mientras usas otras apps. No lee lo que hay en la pantalla.</string>
 </resources>

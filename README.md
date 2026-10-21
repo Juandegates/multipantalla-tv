@@ -1,36 +1,50 @@
 # MultiPantalla TV
 
-App personal para Android TV que divide la pantalla en 4 cuadros y abre una app
-distinta en cada uno (YouTube, Twitch, etc.), con control y sonido por cuadro.
+App personal para Android TV que acomoda varias apps a la vez (YouTube, Twitch,
+etc.) en 2, 3 o 4 ventanas, con control, volumen y pausa por ventana.
 
 ## Cómo funciona
 
-- Cada cuadro es una **pantalla virtual** de Android (1280×720) que la app dibuja
-  dentro de su propia cuadrícula.
-- Las pantallas se crean con permisos de shell a través de **Shizuku**, con la
-  misma técnica que usa scrcpy para `--new-display`.
-- El sonido de cada app se silencia con `appops PLAY_AUDIO`.
+- Usa las **ventanas libres** de Android (un ajuste oculto que la app activa
+  desde la revisión inicial; necesita un reinicio de la TV la primera vez).
+- Cada app se abre como ventana con su tamaño exacto, a través de **Shizuku**
+  (permisos de shell, sin root).
+- **Volumen por ventana:** cambia el volumen propio de los reproductores de
+  cada app (la misma API que usa el volumen por app de MIUI). Android 13+.
+- **Pausa por ventana:** usa la sesión multimedia de la app; si no tiene,
+  pausa sus reproductores de audio.
+- **Silenciar:** `appops PLAY_AUDIO`.
 
 ## Controles
 
-- **Flechas:** elegir cuadro.
-- **OK:** elegir app (cuadro vacío) o controlar la app del cuadro.
-- **OK largo / Menú:** opciones del cuadro (silenciar, cambiar, cerrar, diagnóstico).
-- **En modo control:** todas las teclas van a esa app. **Mantén Atrás** para salir.
+Durante la sesión, en cualquier app:
+
+- **CH ▲ / CH ▼:** pasar el control a la ventana siguiente / anterior
+  (aparece un borde naranja en la ventana activa).
+- **ⓘ:** menú rápido de la ventana activa: pausa, volumen (◀ ▶), silenciar,
+  que solo suene esa, pantalla completa, cambiar diseño, cerrar todo.
+
+Las teclas se pueden cambiar en **Asignar teclas**. El **Probador de teclas**
+muestra qué botones llegan a la app (algunos los usa la TV y no llegan).
 
 ## Descarga
 
 Último APK (siempre el mismo link):
 https://github.com/Juandegates/multipantalla-tv/releases/download/latest/MultiPantallaTV.apk
 
-## Requisitos en la TV
+## Iniciar Shizuku (cada vez que se reinicia la TV)
 
-1. Shizuku instalado e iniciado (por ADB desde Termux).
-2. Depuración inalámbrica activada en Opciones para desarrolladores.
+Desde Termux, con la TV conectada por `adb connect`:
+
+```
+adb shell 'P=$(pm path moe.shizuku.privileged.api | head -1 | cut -d: -f2); S=$(ls $(dirname $P)/lib/*/libshizuku.so 2>/dev/null | head -1); if [ -n "$S" ]; then $S; else sh /storage/emulated/0/Android/data/moe.shizuku.privileged.api/start.sh; fi'
+```
 
 ## Créditos
 
 `FakeContext` y `Workarounds` están adaptados de
 [scrcpy](https://github.com/Genymobile/scrcpy) (Apache 2.0).
+La idea del volumen por app viene de
+[NoMixer](https://github.com/0NLyM/AppMixer).
 La llave `keystore/debug.keystore` es solo de pruebas, para que cada APK nuevo
 se instale encima del anterior.
