@@ -84,6 +84,10 @@ public class MainActivity extends Activity implements Director.Listener {
 
     @Override
     protected void onDestroy() {
+        if (isFinishing()) {
+            // Salir de MultiPantalla: todo vuelve a la normalidad.
+            director.stopSession(false);
+        }
         director.removeListener(this);
         TeclasService.setSpy(null);
         super.onDestroy();
@@ -200,7 +204,26 @@ public class MainActivity extends Activity implements Director.Listener {
         if (fondoMode && event.getKeyCode() == KeyEvent.KEYCODE_BACK) {
             return true;
         }
+        if (!fondoMode && event.getKeyCode() == KeyEvent.KEYCODE_BACK) {
+            if (event.getAction() == KeyEvent.ACTION_UP) {
+                confirmExit();
+            }
+            return true;
+        }
         return super.dispatchKeyEvent(event);
+    }
+
+    private void confirmExit() {
+        if (!director.sessionActive && !director.starting) {
+            finish();
+            return;
+        }
+        new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                .setTitle("¿Cerrar todo y salir?")
+                .setMessage("Se cerrarán las ventanas y la TV queda como siempre.")
+                .setPositiveButton("Salir", (d, w) -> finish())
+                .setNegativeButton("Cancelar", null)
+                .show();
     }
 
     // ------------------------------------------------------------------ dibujar

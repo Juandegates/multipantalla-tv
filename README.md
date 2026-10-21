@@ -26,6 +26,10 @@ Durante la sesión, en cualquier app:
 - **ⓘ:** menú rápido de la ventana activa: pausa, volumen (◀ ▶), silenciar,
   que solo suene esa, pantalla completa, cambiar diseño, cerrar todo.
 
+**Salir:** presionar **Inicio** durante la sesión, o **Atrás** en el panel,
+cierra las ventanas, restaura audio y volumen y deja las apps en pantalla
+completa. Fuera de la sesión el servicio de teclas no revisa ninguna tecla.
+
 Las teclas se pueden cambiar en **Asignar teclas**. El **Probador de teclas**
 muestra qué botones llegan a la app (algunos los usa la TV y no llegan).
 

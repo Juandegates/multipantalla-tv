@@ -533,23 +533,57 @@ public final class Director {
 
     /** Cierra las apps de la sesión y deja su audio como estaba. */
     public void stopSession() {
+        stopSession(true);
+    }
+
+    /**
+     * @param backToPanel true si el usuario sigue en MultiPantalla; false si salió
+     *                    (Inicio o salir): entonces se cierra todo sin abrir nada encima.
+     */
+    public void stopSession(final boolean backToPanel) {
+        if (!sessionActive && !starting) {
+            return;
+        }
         final List<String> pkgs = new ArrayList<>();
+        final List<Integer> tasks = new ArrayList<>();
         for (Slot s : slots) {
+            tasks.add(s.taskId);
             if (s.pkg != null && s.running()) {
                 pkgs.add(s.pkg);
             }
             s.taskId = -1;
         }
         sessionActive = false;
+        starting = false;
         active = -1;
         fullscreenSlot = -1;
         notifyChanged();
         work.execute(() -> {
             for (String pkg : pkgs) {
                 restoreAudio(pkg);
-                exec("am force-stop " + pkg);
             }
-            resetToFullscreen(pkgs);
+            if (backToPanel) {
+                for (String pkg : pkgs) {
+                    exec("am force-stop " + pkg);
+                }
+                resetToFullscreen(pkgs);
+            } else {
+                // Salida silenciosa: cada ventana se agranda a pantalla completa antes de
+                // cerrarla, para que Android recuerde ese tamaño, sin abrir nada encima.
+                IMultiService s = service;
+                for (int i = 0; i < slots.length; i++) {
+                    Integer task = i < tasks.size() ? tasks.get(i) : -1;
+                    if (s != null && task != null && task >= 0) {
+                        try {
+                            s.resizeTask(task, 0, 0, screenW, screenH);
+                        } catch (Exception ignored) {
+                        }
+                    }
+                }
+                for (String pkg : pkgs) {
+                    exec("am force-stop " + pkg);
+                }
+            }
         });
     }
 

@@ -46,6 +46,54 @@ public class TeclasService extends AccessibilityService implements Director.List
 
     public static void setSpy(KeySpy keySpy) {
         spy = keySpy;
+        TeclasService s = instance;
+        if (s != null) {
+            s.main.post(s::updateKeyFiltering);
+        }
+    }
+
+    private boolean filtering = true;
+
+    /**
+     * Fuera de la sesión el servicio no revisa ninguna tecla: la TV funciona
+     * exactamente igual que sin MultiPantalla.
+     */
+    private void updateKeyFiltering() {
+        boolean want = director != null && (director.sessionActive || director.starting || menuOpen)
+                || spy != null;
+        if (want == filtering) {
+            return;
+        }
+        try {
+            android.accessibilityservice.AccessibilityServiceInfo info = getServiceInfo();
+            if (info == null) {
+                return;
+            }
+            if (want) {
+                info.flags |= android.accessibilityservice.AccessibilityServiceInfo.FLAG_REQUEST_FILTER_KEY_EVENTS;
+            } else {
+                info.flags &= ~android.accessibilityservice.AccessibilityServiceInfo.FLAG_REQUEST_FILTER_KEY_EVENTS;
+            }
+            setServiceInfo(info);
+            filtering = want;
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private String homePackage;
+
+    private String homePackage() {
+        if (homePackage == null) {
+            try {
+                android.content.Intent home = new android.content.Intent(android.content.Intent.ACTION_MAIN)
+                        .addCategory(android.content.Intent.CATEGORY_HOME);
+                android.content.pm.ResolveInfo ri = getPackageManager().resolveActivity(home, 0);
+                homePackage = ri != null && ri.activityInfo != null ? ri.activityInfo.packageName : "";
+            } catch (Throwable t) {
+                homePackage = "";
+            }
+        }
+        return homePackage;
     }
 
     private final Handler main = new Handler(Looper.getMainLooper());
@@ -86,6 +134,7 @@ public class TeclasService extends AccessibilityService implements Director.List
         windows = (WindowManager) getSystemService(Context.WINDOW_SERVICE);
         director.addListener(this);
         main.postDelayed(refresher, 4000);
+        updateKeyFiltering();
     }
 
     @Override
@@ -122,6 +171,20 @@ public class TeclasService extends AccessibilityService implements Director.List
 
     @Override
     public void onAccessibilityEvent(AccessibilityEvent event) {
+        // Si se presiona Inicio durante la sesión, MultiPantalla se cierra sola
+        // y deja todo como estaba.
+        if (director == null || !director.sessionActive || director.starting || event == null
+                || event.getEventType() != AccessibilityEvent.TYPE_WINDOW_STATE_CHANGED
+                || event.getPackageName() == null) {
+            return;
+        }
+        String pkg = event.getPackageName().toString();
+        String home = homePackage();
+        if (!home.isEmpty() && home.equals(pkg)) {
+            closeMenu();
+            hideBorder();
+            director.stopSession(false);
+        }
     }
 
     @Override
@@ -238,6 +301,7 @@ public class TeclasService extends AccessibilityService implements Director.List
 
     @Override
     public void onDirectorChanged() {
+        updateKeyFiltering();
         if (director.active != lastActive) {
             lastActive = director.active;
             if (director.sessionActive && director.active >= 0) {
