@@ -7,7 +7,7 @@ public final class Layouts {
 
     public static final String[] NAMES = {
             "2 lado a lado",
-            "2 mitades",
+            "2 centradas 16:9",
             "3 cuadros",
             "Principal + 3",
             "4 cuadros",
@@ -15,10 +15,10 @@ public final class Layouts {
 
     // {izquierda, arriba, derecha, abajo} en fracciones de 0 a 1.
     private static final float[][][] SLOTS = {
-            // 2 lado a lado: dos 16:9 centrados verticalmente.
-            {{0f, .25f, .5f, .75f}, {.5f, .25f, 1f, .75f}},
-            // 2 mitades: ocupan todo el alto.
+            // 2 lado a lado: cada una ocupa media pantalla, de arriba abajo.
             {{0f, 0f, .5f, 1f}, {.5f, 0f, 1f, 1f}},
+            // 2 centradas 16:9: del tamaño exacto del video, centradas a lo alto.
+            {{0f, .25f, .5f, .75f}, {.5f, .25f, 1f, .75f}},
             // 3 cuadros: dos arriba y uno abajo al centro.
             {{0f, 0f, .5f, .5f}, {.5f, 0f, 1f, .5f}, {.25f, .5f, .75f, 1f}},
             // Principal + 3: una grande y tres chicas a la derecha.

@@ -6,10 +6,13 @@ import android.content.Context;
 import android.content.Intent;
 import android.content.pm.ApplicationInfo;
 import android.graphics.Rect;
+import android.media.AudioFocusInfo;
 import android.media.AudioManager;
 import android.media.AudioPlaybackConfiguration;
 import android.media.session.MediaController;
-import android.media.session.MediaSessionManager;
+import android.media.audiopolicy.AudioPolicy;
+import android.media.session.MediaSession;
+import android.os.IBinder;
 import android.media.session.PlaybackState;
 import android.os.Build;
 import android.os.Bundle;
@@ -153,7 +156,67 @@ public class MultiService extends IMultiService.Stub {
         exec("am force-stop " + pkg);
         SystemClock.sleep(400);
         String second = launchOnce(cn, left, top, right, bottom, notes);
-        return second.startsWith("ok:") ? second : first;
+        String result = second.startsWith("ok:") ? second : first;
+        // Algunas apps tardan en arrancar y Android las vuelve a poner en su tamaño por
+        // defecto: se revisa varias veces que la ventana quedó en su lugar.
+        int task = Integer.parseInt(result.substring(3));
+        ensureBounds(task, left, top, right, bottom, 6000);
+        return result;
+    }
+
+    private void ensureBounds(int task, int left, int top, int right, int bottom, long timeoutMs) {
+        long end = SystemClock.uptimeMillis() + timeoutMs;
+        int good = 0;
+        while (SystemClock.uptimeMillis() < end) {
+            SystemClock.sleep(500);
+            int[] b = taskBounds(task);
+            if (b.length == 4 && b[0] == left && b[1] == top && b[2] == right && b[3] == bottom) {
+                if (++good >= 2) {
+                    return;
+                }
+            } else {
+                good = 0;
+                resizeTask(task, left, top, right, bottom);
+            }
+        }
+    }
+
+    @Override
+    public int[] taskBounds(int taskId) {
+        try {
+            Object atm = Class.forName("android.app.ActivityTaskManager").getMethod("getService").invoke(null);
+            for (Method m : atm.getClass().getMethods()) {
+                if (!m.getName().equals("getTasks")) {
+                    continue;
+                }
+                Class<?>[] types = m.getParameterTypes();
+                Object[] args = new Object[types.length];
+                for (int i = 0; i < types.length; i++) {
+                    args[i] = types[i] == int.class ? (i == 0 ? 100 : -1) : types[i] == boolean.class ? false : null;
+                }
+                List<?> tasks = (List<?>) m.invoke(atm, args);
+                for (Object info : tasks) {
+                    if (info.getClass().getField("taskId").getInt(info) != taskId) {
+                        continue;
+                    }
+                    Object config = info.getClass().getField("configuration").get(info);
+                    Object wc = config.getClass().getField("windowConfiguration").get(config);
+                    Rect r = (Rect) wc.getClass().getMethod("getBounds").invoke(wc);
+                    return new int[]{r.left, r.top, r.right, r.bottom};
+                }
+                break;
+            }
+        } catch (Throwable t) {
+            remember("taskBounds", t);
+        }
+        // Plan B: leer el "bounds=" de dumpsys.
+        String dump = exec("dumpsys activity activities | grep -A3 '#" + taskId + " ' | grep -m1 -oE 'bounds=Rect\\([^)]*\\)'");
+        Matcher m = Pattern.compile("(-?\\d+), (-?\\d+) - (-?\\d+), (-?\\d+)").matcher(dump);
+        if (m.find()) {
+            return new int[]{Integer.parseInt(m.group(1)), Integer.parseInt(m.group(2)),
+                    Integer.parseInt(m.group(3)), Integer.parseInt(m.group(4))};
+        }
+        return new int[0];
     }
 
     private String launchOnce(ComponentName cn, int left, int top, int right, int bottom, StringBuilder notes) {
@@ -466,9 +529,7 @@ public class MultiService extends IMultiService.Stub {
     public String media(String pkg, String action) {
         // 1) Sesión multimedia de la app: pausa de verdad el video.
         try {
-            MediaSessionManager msm = (MediaSessionManager) ctx().getSystemService(Context.MEDIA_SESSION_SERVICE);
-            List<MediaController> sessions = msm.getActiveSessions(null);
-            for (MediaController c : sessions) {
+            for (MediaController c : sessions()) {
                 if (!pkg.equals(c.getPackageName())) {
                     continue;
                 }
@@ -539,10 +600,8 @@ public class MultiService extends IMultiService.Stub {
             sb.append("Error: ").append(shortError(t));
         }
         try {
-            MediaSessionManager msm = (MediaSessionManager) ctx().getSystemService(Context.MEDIA_SESSION_SERVICE);
-            List<MediaController> sessions = msm.getActiveSessions(null);
             sb.append("Sesiones multimedia: ");
-            for (MediaController c : sessions) {
+            for (MediaController c : sessions()) {
                 PlaybackState st = c.getPlaybackState();
                 sb.append(c.getPackageName()).append('(').append(st == null ? "?" : st.getState()).append(") ");
             }
@@ -607,8 +666,107 @@ public class MultiService extends IMultiService.Stub {
         return lastError;
     }
 
+    /**
+     * Sesiones multimedia activas. Se piden directo al servicio del sistema
+     * (MediaSessionManager falla con nuestro contexto falso).
+     */
+    private List<MediaController> sessions() throws Exception {
+        Object binder = Class.forName("android.os.ServiceManager")
+                .getMethod("getService", String.class).invoke(null, "media_session");
+        Object msm = Class.forName("android.media.session.ISessionManager$Stub")
+                .getMethod("asInterface", IBinder.class).invoke(null, binder);
+        Object result = null;
+        for (Method m : msm.getClass().getMethods()) {
+            if (m.getName().equals("getSessions") && m.getParameterTypes().length == 2) {
+                result = m.invoke(msm, null, 0);
+                break;
+            }
+        }
+        List<?> tokens;
+        if (result instanceof List) {
+            tokens = (List<?>) result;
+        } else if (result != null) {
+            tokens = (List<?>) result.getClass().getMethod("getList").invoke(result);
+        } else {
+            tokens = new ArrayList<>();
+        }
+        List<MediaController> list = new ArrayList<>();
+        for (Object t : tokens) {
+            if (t instanceof MediaSession.Token) {
+                list.add(new MediaController(ctx(), (MediaSession.Token) t));
+            }
+        }
+        return list;
+    }
+
+    // ---------------------------------------------------------------- audio compartido
+
+    private AudioPolicy sharePolicy;
+
+    /** Da el audio a todas las apps sin avisarle a ninguna que lo perdió. */
+    private final class ShareListener extends AudioPolicy.AudioPolicyFocusListener {
+        @Override
+        public void onAudioFocusRequest(AudioFocusInfo afi, int requestResult) {
+            AudioPolicy p = sharePolicy;
+            if (p != null) {
+                try {
+                    p.setFocusRequestResult(afi, AudioManager.AUDIOFOCUS_REQUEST_GRANTED);
+                } catch (Throwable t) {
+                    remember("setFocusRequestResult", t);
+                }
+            }
+        }
+    }
+
+    @Override
+    public synchronized String setShareAudio(boolean on) {
+        AudioManager audio = (AudioManager) ctx().getSystemService(Context.AUDIO_SERVICE);
+        if (!on) {
+            if (sharePolicy == null) {
+                return "ok";
+            }
+            try {
+                AudioManager.class.getMethod("unregisterAudioPolicy", AudioPolicy.class).invoke(audio, sharePolicy);
+            } catch (Throwable t) {
+                try {
+                    AudioManager.class.getMethod("unregisterAudioPolicyAsync", AudioPolicy.class).invoke(audio, sharePolicy);
+                } catch (Throwable t2) {
+                    remember("unregisterAudioPolicy", t2);
+                }
+            }
+            sharePolicy = null;
+            return "ok";
+        }
+        if (sharePolicy != null) {
+            return "ok";
+        }
+        try {
+            AudioPolicy policy = new AudioPolicy.Builder(ctx())
+                    .setAudioPolicyFocusListener(new ShareListener())
+                    .setIsAudioFocusPolicy(true)
+                    .build();
+            sharePolicy = policy;
+            int r = (Integer) AudioManager.class.getMethod("registerAudioPolicy", AudioPolicy.class)
+                    .invoke(audio, policy);
+            if (r != 0) {
+                sharePolicy = null;
+                lastError = "registerAudioPolicy=" + r;
+                return "error:" + lastError;
+            }
+            return "ok";
+        } catch (Throwable t) {
+            sharePolicy = null;
+            remember("setShareAudio", t);
+            return "error:" + shortError(t);
+        }
+    }
+
     @Override
     public void destroy() {
+        try {
+            setShareAudio(false);
+        } catch (Throwable ignored) {
+        }
         // Antes de salir, todas las apps vuelven a su volumen normal.
         try {
             volumes.replaceAll((uid, v) -> 1f);

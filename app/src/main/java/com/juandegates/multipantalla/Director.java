@@ -489,6 +489,17 @@ public final class Director {
             }
             SystemClock.sleep(300);
             StringBuilder problems = new StringBuilder();
+            // Reparto de audio: así ninguna app pausa a las otras al empezar a sonar.
+            String share;
+            try {
+                share = service.setShareAudio(true);
+            } catch (Exception e) {
+                share = "error:" + e.getMessage();
+            }
+            if (!"ok".equals(share)) {
+                problems.append("Audio compartido no disponible (").append(share)
+                        .append("); las apps podrían pausarse entre sí.\n");
+            }
             int first = -1;
             for (int i = 0; i < count; i++) {
                 Slot s = slots[i];
@@ -522,7 +533,7 @@ public final class Director {
                 fullscreenSlot = -1;
                 message = errors.isEmpty() ? "Listo. " + keyName(keyNext) + "/" + keyName(keyPrev)
                         + " cambia de ventana · " + keyName(keyMenu) + " abre el menú."
-                        : "Algunas apps no abrieron:\n" + errors;
+                        : "Avisos:\n" + errors;
                 notifyChanged();
                 if (firstSlot >= 0) {
                     focusSlot(firstSlot);
@@ -559,6 +570,13 @@ public final class Director {
         fullscreenSlot = -1;
         notifyChanged();
         work.execute(() -> {
+            try {
+                IMultiService sv = service;
+                if (sv != null) {
+                    sv.setShareAudio(false);
+                }
+            } catch (Exception ignored) {
+            }
             for (String pkg : pkgs) {
                 restoreAudio(pkg);
             }
@@ -853,6 +871,27 @@ public final class Director {
                 } catch (Exception ignored) {
                 }
             }
+        });
+    }
+
+    /** Vuelve a poner cada ventana en su cuadro (por si alguna se movió). */
+    public void rearrange() {
+        if (!sessionActive || service == null) {
+            return;
+        }
+        work.execute(() -> {
+            for (int i = 0; i < slots.length; i++) {
+                Slot s = slots[i];
+                if (!s.running()) {
+                    continue;
+                }
+                Rect r = fullscreenSlot == i ? new Rect(0, 0, screenW, screenH) : boundsOf(i);
+                try {
+                    service.resizeTask(s.taskId, r.left, r.top, r.right, r.bottom);
+                } catch (Exception ignored) {
+                }
+            }
+            say("Ventanas reacomodadas.");
         });
     }
 

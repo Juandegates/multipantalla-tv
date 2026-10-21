@@ -485,6 +485,7 @@ public class TeclasService extends AccessibilityService implements Director.List
         menuItems.add(new MenuItem("Que solo suene esta", () -> director.soloAudio(a), false, false));
         menuItems.add(new MenuItem(director.fullscreenSlot == a ? "Volver a la cuadrícula" : "Pantalla completa",
                 () -> director.toggleFullscreen(a), true, false));
+        menuItems.add(new MenuItem("Reacomodar ventanas", director::rearrange, true, false));
         menuItems.add(new MenuItem("Diseño: " + Layouts.NAMES[director.layout] + "  (OK cambia)",
                 director::cycleLayout, false, false));
         menuItems.add(new MenuItem("Cambiar apps (abrir MultiPantalla)", director::openPanel, true, false));

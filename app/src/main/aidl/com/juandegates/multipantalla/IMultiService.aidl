@@ -34,4 +34,11 @@ interface IMultiService {
 
     // Diagnóstico de audio: reproductores activos y su app.
     String audioInfo() = 10;
+
+    // Reparto de audio: todas las apps lo reciben y ninguna se entera de que "lo perdió".
+    // Se quita solo si este servicio muere. Devuelve "ok" o el error.
+    String setShareAudio(boolean on) = 11;
+
+    // Lugar real de una ventana: {izq, arriba, der, abajo} o vacío.
+    int[] taskBounds(int taskId) = 12;
 }

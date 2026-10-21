@@ -16,3 +16,4 @@ dependencyResolutionManagement {
 
 rootProject.name = "multipantalla-tv"
 include(":app")
+include(":stubs")
