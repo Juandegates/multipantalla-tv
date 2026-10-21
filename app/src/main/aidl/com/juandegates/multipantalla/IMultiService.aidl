@@ -45,4 +45,7 @@ interface IMultiService {
     // Abre una app en pantalla completa (si se puede, por detrás de lo que se ve)
     // para que Android olvide su tamaño de ventana. Devuelve "detras", "visible" o el error.
     String launchFullscreen(String component, boolean behind) = 13;
+
+    // Eventos del servicio (peticiones de audio y respuestas), para el reporte.
+    String serviceEvents() = 14;
 }

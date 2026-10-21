@@ -735,18 +735,93 @@ public class MultiService extends IMultiService.Stub {
 
     private AudioPolicy sharePolicy;
 
+    // ---------------------------------------------------------------- eventos para el reporte
+
+    private final java.util.ArrayDeque<String> events = new java.util.ArrayDeque<>();
+    private final java.text.SimpleDateFormat clock =
+            new java.text.SimpleDateFormat("HH:mm:ss.SSS", java.util.Locale.US);
+
+    private void event(String text) {
+        Log.i(TAG, text);
+        synchronized (events) {
+            events.addLast(clock.format(new java.util.Date()) + "  " + text);
+            while (events.size() > 300) {
+                events.removeFirst();
+            }
+        }
+    }
+
+    @Override
+    public String serviceEvents() {
+        StringBuilder sb = new StringBuilder();
+        synchronized (events) {
+            for (String e : events) {
+                sb.append(e).append('\n');
+            }
+        }
+        return sb.toString();
+    }
+
+    private Method focusResultMethod;
+
+    /**
+     * Contesta a una app que pidió el audio. En Android la función está en AudioManager
+     * (setFocusRequestResult(info, resultado, política)); en algunas versiones en AudioPolicy.
+     */
+    private String answerFocus(AudioFocusInfo afi, int result) {
+        AudioPolicy p = sharePolicy;
+        if (p == null) {
+            return "sin política";
+        }
+        AudioManager audio = (AudioManager) ctx().getSystemService(Context.AUDIO_SERVICE);
+        try {
+            if (focusResultMethod == null) {
+                for (Method m : AudioManager.class.getMethods()) {
+                    if (m.getName().equals("setFocusRequestResult") && m.getParameterTypes().length == 3) {
+                        focusResultMethod = m;
+                        break;
+                    }
+                }
+            }
+            if (focusResultMethod != null) {
+                focusResultMethod.invoke(audio, afi, result, p);
+                return "ok (AudioManager)";
+            }
+        } catch (Throwable t) {
+            remember("AudioManager.setFocusRequestResult", t);
+        }
+        try {
+            for (Method m : AudioPolicy.class.getMethods()) {
+                if (m.getName().equals("setFocusRequestResult") && m.getParameterTypes().length == 2) {
+                    m.invoke(p, afi, result);
+                    return "ok (AudioPolicy)";
+                }
+            }
+        } catch (Throwable t) {
+            remember("AudioPolicy.setFocusRequestResult", t);
+        }
+        return "error: " + lastError;
+    }
+
+    private static String describe(AudioFocusInfo afi) {
+        try {
+            return afi.getPackageName() + " (uid " + afi.getClientUid() + ", pide " + afi.getGainRequest() + ")";
+        } catch (Throwable t) {
+            return String.valueOf(afi);
+        }
+    }
+
     /** Da el audio a todas las apps sin avisarle a ninguna que lo perdió. */
     private final class ShareListener extends AudioPolicy.AudioPolicyFocusListener {
         @Override
         public void onAudioFocusRequest(AudioFocusInfo afi, int requestResult) {
-            AudioPolicy p = sharePolicy;
-            if (p != null) {
-                try {
-                    p.setFocusRequestResult(afi, AudioManager.AUDIOFOCUS_REQUEST_GRANTED);
-                } catch (Throwable t) {
-                    remember("setFocusRequestResult", t);
-                }
-            }
+            String r = answerFocus(afi, AudioManager.AUDIOFOCUS_REQUEST_GRANTED);
+            event("Audio pedido por " + describe(afi) + " → concedido: " + r);
+        }
+
+        @Override
+        public void onAudioFocusAbandon(AudioFocusInfo afi) {
+            event("Audio soltado por " + describe(afi));
         }
     }
 
@@ -767,6 +842,7 @@ public class MultiService extends IMultiService.Stub {
                 }
             }
             sharePolicy = null;
+            event("Audio compartido: apagado");
             return "ok";
         }
         if (sharePolicy != null) {
@@ -783,8 +859,10 @@ public class MultiService extends IMultiService.Stub {
             if (r != 0) {
                 sharePolicy = null;
                 lastError = "registerAudioPolicy=" + r;
+                event("Audio compartido: no se pudo registrar (" + r + ")");
                 return "error:" + lastError;
             }
+            event("Audio compartido: encendido");
             return "ok";
         } catch (Throwable t) {
             sharePolicy = null;

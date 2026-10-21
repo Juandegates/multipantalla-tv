@@ -227,6 +227,11 @@ public final class Director {
                 }
             }
             if (service != null) {
+                try {
+                    sb.append("\n===== EVENTOS DEL SERVICIO (audio) =====\n").append(service.serviceEvents());
+                } catch (Exception e) {
+                    sb.append("(no disponibles: ").append(e.getMessage()).append(")\n");
+                }
                 sb.append("\n===== ACCESIBILIDAD =====\n")
                         .append(exec("settings get secure enabled_accessibility_services; "
                                 + "dumpsys accessibility | grep -iE 'Bound services|Enabled services|multipantalla' | head -10"));
@@ -245,9 +250,10 @@ public final class Director {
                     }
                 }
                 sb.append("\n===== REGISTRO DEL SISTEMA (últimas líneas relevantes) =====\n")
-                        .append(exec("logcat -d -v time -t 6000 | grep -iE 'MP-|multipantalla|shizuku|"
+                        .append(exec("logcat -d -v time -t 8000 | grep -iE 'MP-|multipantalla|shizuku|"
                                 + "ActivityTaskManager|WindowManager.*(freeform|resize)|AudioService|MediaFocus|"
-                                + "youtube|twitch|AndroidRuntime|FATAL' | tail -400"));
+                                + "youtube|twitch|AndroidRuntime|FATAL|has died|ANR|Force finishing|codec' "
+                                + "| grep -vE 'BasicMediaStatusFactory|AudioMediaPlayerWrapper|CoreBackPreview' | tail -400"));
             } else {
                 sb.append("\n(Sin conexión con Shizuku: no se pudo leer el sistema)\n");
             }
