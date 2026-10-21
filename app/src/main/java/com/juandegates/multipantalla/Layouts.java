@@ -51,8 +51,15 @@ public final class Layouts {
 
     public static Rect bounds(int layout, int slot, int width, int height) {
         float[] f = SLOTS[clamp(layout)][slot];
-        return new Rect(Math.round(f[0] * width), Math.round(f[1] * height),
+        Rect r = new Rect(Math.round(f[0] * width), Math.round(f[1] * height),
                 Math.round(f[2] * width), Math.round(f[3] * height));
+        // Margen a los lados (1/32 del ancho del cuadro, ~30 px en media pantalla):
+        // con la ventana justo del ancho del cuadro, YouTube arma su pantalla un poco
+        // más ancha y se corta a la derecha; un poco más angosta se ve completa.
+        int side = Math.round(r.width() / 32f);
+        r.left += side;
+        r.right -= side;
+        return r;
     }
 
     public static int clamp(int layout) {
