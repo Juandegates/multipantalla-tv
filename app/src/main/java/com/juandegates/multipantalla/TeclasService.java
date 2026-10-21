@@ -131,6 +131,7 @@ public class TeclasService extends AccessibilityService implements Director.List
         super.onServiceConnected();
         instance = this;
         director = Director.get(this);
+        director.log("Servicio de teclas conectado");
         windows = (WindowManager) getSystemService(Context.WINDOW_SERVICE);
         director.addListener(this);
         main.postDelayed(refresher, 4000);
@@ -150,6 +151,9 @@ public class TeclasService extends AccessibilityService implements Director.List
     }
 
     private void cleanup() {
+        if (director != null) {
+            director.log("Servicio de teclas desconectado");
+        }
         main.removeCallbacksAndMessages(null);
         hideBorder();
         closeMenu();
@@ -181,6 +185,7 @@ public class TeclasService extends AccessibilityService implements Director.List
         String pkg = event.getPackageName().toString();
         String home = homePackage();
         if (!home.isEmpty() && home.equals(pkg)) {
+            director.log("Se detectó Inicio (" + pkg + "): cerrar todo");
             closeMenu();
             hideBorder();
             director.stopSession(false);
@@ -216,6 +221,9 @@ public class TeclasService extends AccessibilityService implements Director.List
             return false;
         }
         boolean down = event.getAction() == KeyEvent.ACTION_DOWN && event.getRepeatCount() == 0;
+        if (down && (code == director.keyNext || code == director.keyPrev || code == director.keyMenu)) {
+            director.log("Tecla " + Director.keyName(code));
+        }
         if (code == director.keyNext) {
             if (down) {
                 director.focusNext();
@@ -486,6 +494,8 @@ public class TeclasService extends AccessibilityService implements Director.List
         menuItems.add(new MenuItem(director.fullscreenSlot == a ? "Volver a la cuadrícula" : "Pantalla completa",
                 () -> director.toggleFullscreen(a), true, false));
         menuItems.add(new MenuItem("Reacomodar ventanas", director::rearrange, true, false));
+        menuItems.add(new MenuItem("Generar reporte", () -> director.makeReport(r -> director.log("Reporte: " + r)),
+                true, false));
         menuItems.add(new MenuItem("Diseño: " + Layouts.NAMES[director.layout] + "  (OK cambia)",
                 director::cycleLayout, false, false));
         menuItems.add(new MenuItem("Cambiar apps (abrir MultiPantalla)", director::openPanel, true, false));

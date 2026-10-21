@@ -184,7 +184,93 @@ public final class Director {
         }
     }
 
+    // ------------------------------------------------------------ registro para el reporte
+
+    private final java.util.ArrayDeque<String> events = new java.util.ArrayDeque<>();
+    private final java.text.SimpleDateFormat clock =
+            new java.text.SimpleDateFormat("HH:mm:ss.SSS", java.util.Locale.US);
+
+    /** Anota un evento para el reporte (se guardan los últimos 600). */
+    public void log(String text) {
+        String line = clock.format(new java.util.Date()) + "  " + text;
+        android.util.Log.i("MP-Director", text);
+        synchronized (events) {
+            events.addLast(line);
+            while (events.size() > 600) {
+                events.removeFirst();
+            }
+        }
+    }
+
+    public static final String REPORT_NAME = "MultiPantalla-reporte.txt";
+
+    /**
+     * Junta todo en un archivo de texto en la carpeta Descargas de la TV:
+     * eventos de la app, estado, ventanas, audio, teclas y registro del sistema.
+     */
+    public void makeReport(final java.util.function.Consumer<String> done) {
+        log("Generando reporte");
+        diagnostics(diag -> work.execute(() -> {
+            StringBuilder sb = new StringBuilder();
+            sb.append("===== MultiPantalla ").append(BuildConfig.VERSION_NAME).append(" · ")
+                    .append(new java.util.Date()).append(" =====\n\n");
+            sb.append("===== ESTADO =====\n").append(diag).append("\n\n");
+            sb.append("Sesión activa: ").append(sessionActive).append(" · abriendo: ").append(starting)
+                    .append(" · activa: ").append(active).append(" · completa: ").append(fullscreenSlot)
+                    .append(" · diseño: ").append(Layouts.NAMES[layout]).append('\n');
+            sb.append("Teclas: sig ").append(keyName(keyNext)).append(" · ant ").append(keyName(keyPrev))
+                    .append(" · menú ").append(keyName(keyMenu)).append("\n\n");
+            sb.append("===== EVENTOS DE LA APP =====\n");
+            synchronized (events) {
+                for (String e : events) {
+                    sb.append(e).append('\n');
+                }
+            }
+            if (service != null) {
+                sb.append("\n===== ACCESIBILIDAD =====\n")
+                        .append(exec("settings get secure enabled_accessibility_services; "
+                                + "dumpsys accessibility | grep -iE 'Bound services|Enabled services|multipantalla' | head -10"));
+                sb.append("\n\n===== VENTANAS =====\n")
+                        .append(exec("dumpsys activity activities | grep -E '\\* Task\\{|bounds=' | head -40"));
+                sb.append("\n\n===== AUDIO (foco y reproductores) =====\n")
+                        .append(exec("dumpsys audio | grep -A8 'focus stack entries'; "
+                                + "dumpsys audio | grep -iE 'requestAudioFocus|abandonAudioFocus|loss|policy' | tail -25; "
+                                + "dumpsys audio | grep 'AudioPlaybackConfiguration' | grep -v 'state:idle' | cut -c1-220"));
+                sb.append("\n\n===== PERMISOS DE AUDIO =====\n");
+                for (Slot s : slots) {
+                    if (s.pkg != null) {
+                        sb.append(s.pkg).append(": ").append(exec("cmd appops get " + s.pkg
+                                + " PLAY_AUDIO | sed 's/;.*//'; cmd appops get " + s.pkg
+                                + " TAKE_AUDIO_FOCUS | sed 's/;.*//'").replace('\n', ' ')).append('\n');
+                    }
+                }
+                sb.append("\n===== REGISTRO DEL SISTEMA (últimas líneas relevantes) =====\n")
+                        .append(exec("logcat -d -v time -t 6000 | grep -iE 'MP-|multipantalla|shizuku|"
+                                + "ActivityTaskManager|WindowManager.*(freeform|resize)|AudioService|MediaFocus|"
+                                + "youtube|twitch|AndroidRuntime|FATAL' | tail -400"));
+            } else {
+                sb.append("\n(Sin conexión con Shizuku: no se pudo leer el sistema)\n");
+            }
+            String result;
+            try {
+                java.io.File dir = context.getExternalFilesDir(null);
+                java.io.File file = new java.io.File(dir, REPORT_NAME);
+                try (java.io.FileOutputStream out = new java.io.FileOutputStream(file)) {
+                    out.write(sb.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+                }
+                // Copia en Descargas para sacarlo fácil con adb.
+                exec("cp '" + file.getAbsolutePath() + "' /sdcard/Download/" + REPORT_NAME);
+                result = "ok";
+            } catch (Exception e) {
+                result = "error: " + e.getMessage();
+            }
+            final String r = result;
+            main.post(() -> done.accept(r));
+        }));
+    }
+
     private void say(String text) {
+        log("Aviso: " + text.replace('\n', ' '));
         main.post(() -> {
             message = text;
             notifyChanged();
@@ -329,7 +415,15 @@ public final class Director {
                 return;
             }
             service = IMultiService.Stub.asInterface(binder);
+            log("Conectado con Shizuku (servicio de sistema)");
             main.removeCallbacks(bindWatchdog);
+            // Si el servicio de teclas quedó "encendido" pero desconectado, reconectarlo solo.
+            main.postDelayed(() -> {
+                if (keyServiceEnabled() && !TeclasService.isConnected()) {
+                    log("Servicio de teclas encendido pero desconectado: reconectando");
+                    enableKeyService();
+                }
+            }, 1500);
             refreshFreeform();
             repairAudio();
             notifyChanged();
@@ -337,6 +431,7 @@ public final class Director {
 
         @Override
         public void onServiceDisconnected(ComponentName name) {
+            log("Se perdió la conexión con Shizuku");
             service = null;
             binding = false;
             notifyChanged();
@@ -416,16 +511,29 @@ public final class Director {
         }
     }
 
+    /**
+     * Activa (o reconecta) el servicio de teclas. Al instalar una versión nueva encima,
+     * la TV lo deja "encendido" pero desconectado; por eso primero se quita de la lista
+     * y luego se vuelve a poner: así la TV lo conecta de nuevo.
+     */
     public void enableKeyService() {
         final String comp = keyServiceComponent();
+        log("Servicio de teclas: activar/reconectar");
         work.execute(() -> {
-            exec("v=$(settings get secure enabled_accessibility_services); "
-                    + "case \"$v\" in *" + BuildConfig.APPLICATION_ID + "*) ;; "
-                    + "null|'') settings put secure enabled_accessibility_services " + comp + " ;; "
-                    + "*) settings put secure enabled_accessibility_services \"$v:" + comp + "\" ;; esac; "
-                    + "settings put secure accessibility_enabled 1");
-            SystemClock.sleep(800);
-            say(keyServiceEnabled() ? "Servicio de teclas activado." : "No se pudo activar el servicio de teclas.");
+            String out = exec("v=$(settings get secure enabled_accessibility_services); "
+                    + "n=$(echo \"$v\" | tr ':' '\\n' | grep -v '^null$' | grep -v " + BuildConfig.APPLICATION_ID + " | paste -sd: -); "
+                    + "if [ -n \"$n\" ]; then settings put secure enabled_accessibility_services \"$n\"; "
+                    + "else settings put secure enabled_accessibility_services null; fi; sleep 1; "
+                    + "if [ -n \"$n\" ]; then settings put secure enabled_accessibility_services \"$n:" + comp + "\"; "
+                    + "else settings put secure enabled_accessibility_services " + comp + "; fi; "
+                    + "settings put secure accessibility_enabled 1; settings get secure enabled_accessibility_services");
+            log("Servicios de accesibilidad: " + out);
+            for (int i = 0; i < 10 && !TeclasService.isConnected(); i++) {
+                SystemClock.sleep(300);
+            }
+            log("Servicio de teclas conectado: " + TeclasService.isConnected());
+            say(TeclasService.isConnected() ? "Servicio de teclas activado."
+                    : "La TV no conectó el servicio de teclas. Revisa el reporte.");
         });
     }
 
@@ -474,6 +582,7 @@ public final class Director {
             return;
         }
         final int count = Layouts.slots(layout);
+        log("Iniciar sesión · diseño " + Layouts.NAMES[layout] + " · pantalla " + screenW + "x" + screenH);
         starting = true;
         notifyChanged();
         work.execute(() -> {
@@ -496,6 +605,7 @@ public final class Director {
             } catch (Exception e) {
                 share = "error:" + e.getMessage();
             }
+            log("Audio compartido: " + share);
             if (!"ok".equals(share)) {
                 problems.append("Audio compartido no disponible (").append(share)
                         .append("); las apps podrían pausarse entre sí.\n");
@@ -515,8 +625,14 @@ public final class Director {
                 } catch (Exception e) {
                     r = "error:" + e.getMessage();
                 }
+                log("Abrir " + s.name + " en cuadro " + (i + 1) + " " + s.bounds.toShortString() + " → " + r);
                 if (r != null && r.startsWith("ok:")) {
                     s.taskId = Integer.parseInt(r.substring(3));
+                    try {
+                        int[] b = service.taskBounds(s.taskId);
+                        log("  quedó en " + java.util.Arrays.toString(b));
+                    } catch (Exception ignored) {
+                    }
                     if (first < 0) {
                         first = i;
                     }
@@ -555,6 +671,7 @@ public final class Director {
         if (!sessionActive && !starting) {
             return;
         }
+        log("Cerrar sesión · " + (backToPanel ? "volver al panel" : "salida (Inicio/salir)"));
         final List<String> pkgs = new ArrayList<>();
         final List<String> components = new ArrayList<>();
         for (Slot s : slots) {
@@ -607,6 +724,7 @@ public final class Director {
                 r = "error";
             }
             anyVisible |= "visible".equals(r);
+            log("Restablecer pantalla completa " + component + " → " + r);
             SystemClock.sleep(1500);
             ComponentName cn = ComponentName.unflattenFromString(component);
             if (cn != null) {
@@ -711,6 +829,7 @@ public final class Director {
                     id = s.taskId;
                 }
                 if (id != s.taskId) {
+                    log("Ventana de " + s.name + ": " + s.taskId + " → " + id);
                     s.taskId = id;
                     changed = true;
                 }
@@ -770,6 +889,7 @@ public final class Director {
         if (!s.running()) {
             return;
         }
+        log("Control a cuadro " + (i + 1) + " (" + s.name + ", ventana " + s.taskId + ")");
         active = i;
         notifyChanged();
         work.execute(() -> {
@@ -779,6 +899,7 @@ public final class Director {
             } catch (Exception ignored) {
             }
             if (!ok) {
+                log("  setFocusedTask falló; plan B am start");
                 // Plan B: volver a "abrir" la app trae su ventana al frente sin cambiar su tamaño.
                 exec("am start -n " + ComponentName.unflattenFromString(s.component).flattenToShortString());
             }

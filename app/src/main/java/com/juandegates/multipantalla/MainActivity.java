@@ -341,12 +341,14 @@ public class MainActivity extends Activity implements Director.Listener {
                     checklist.addView(row(2, "Revisando ventanas libres…", null, null, null));
             }
 
-            boolean keys = director.keyServiceEnabled() && TeclasService.isConnected();
+            boolean enabled = director.keyServiceEnabled();
+            boolean keys = enabled && TeclasService.isConnected();
             View k = row(keys ? 1 : 0, "Servicio de teclas",
                     keys ? "Escucha " + Director.keyName(director.keyNext) + ", " + Director.keyName(director.keyPrev)
                             + " y " + Director.keyName(director.keyMenu) + " en cualquier app."
+                            : enabled ? "Está encendido pero desconectado (pasa al instalar una versión nueva)."
                             : "Permite cambiar de ventana y abrir el menú con el control.",
-                    keys ? null : "Activar", keys ? null : director::enableKeyService);
+                    keys ? null : enabled ? "Reconectar" : "Activar", keys ? null : director::enableKeyService);
             tagFirst(k, firstAction && !keys);
             checklist.addView(k);
         }
@@ -355,6 +357,9 @@ public class MainActivity extends Activity implements Director.Listener {
         Button diag = button("Diagnóstico", this::showDiagnostics);
         diag.setTag("diag");
         checklist.addView(diag, buttonParams());
+        Button report = button("Generar reporte", this::makeReport);
+        report.setTag("reporte");
+        checklist.addView(report, buttonParams());
         if (director.connected()) {
             Button full = button("Restablecer apps a pantalla completa", director::resetAllToFullscreen);
             full.setTag("full");
@@ -628,6 +633,23 @@ public class MainActivity extends Activity implements Director.Listener {
     }
 
     // ------------------------------------------------------------------ diagnóstico
+
+    private void makeReport() {
+        showStatus("Generando reporte…");
+        director.makeReport(result -> {
+            if ("ok".equals(result)) {
+                new AlertDialog.Builder(this, android.R.style.Theme_DeviceDefault_Dialog_Alert)
+                        .setTitle("Reporte listo")
+                        .setMessage("Se guardó en Descargas de la TV como " + Director.REPORT_NAME
+                                + ".\n\nPara pasarlo a tu celular, en Termux:\n\n"
+                                + "adb pull /sdcard/Download/" + Director.REPORT_NAME + " ~/storage/downloads/")
+                        .setPositiveButton("OK", null)
+                        .show();
+            } else {
+                showStatus("No se pudo guardar el reporte: " + result);
+            }
+        });
+    }
 
     private void showDiagnostics() {
         director.diagnostics(text -> {
