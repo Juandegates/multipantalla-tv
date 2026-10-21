@@ -91,7 +91,7 @@ public class MainActivity extends Activity implements Director.Listener {
 
     @Override
     public void onDirectorChanged() {
-        if (!director.sessionActive && fondoMode) {
+        if (!director.sessionActive && !director.starting && fondoMode) {
             showPanel();
         }
         render(false);
@@ -211,7 +211,8 @@ public class MainActivity extends Activity implements Director.Listener {
                 .append(director.shizukuPermission()).append(director.connected())
                 .append(director.freeform).append(director.keyServiceEnabled())
                 .append(TeclasService.isConnected()).append(director.layout)
-                .append(director.sessionActive).append(director.keyNext).append(director.keyPrev)
+                .append(director.sessionActive).append(director.starting).append(director.bindingSlow())
+                .append(director.keyNext).append(director.keyPrev)
                 .append(director.keyMenu);
         for (Director.Slot s : director.slots) {
             sb.append('|').append(s.component).append(s.taskId);
@@ -282,8 +283,11 @@ public class MainActivity extends Activity implements Director.Listener {
 
             if (perm) {
                 boolean conn = director.connected();
-                View c = row(conn ? 1 : 2, conn ? "Conectado con permisos de sistema" : "Conectando…", null,
-                        conn ? null : "Reintentar", conn ? null : director::tryBind);
+                boolean slow = director.bindingSlow();
+                View c = row(conn ? 1 : 2, conn ? "Conectado con permisos de sistema" : "Conectando…",
+                        conn ? null : slow ? "Tarda mucho: Reintentar abre Shizuku un momento y vuelve." : null,
+                        conn ? null : "Reintentar", conn ? null : () -> director.retryBind(slow));
+                tagFirst(c, firstAction && !conn);
                 checklist.addView(c);
             }
         }
@@ -328,6 +332,12 @@ public class MainActivity extends Activity implements Director.Listener {
         Button diag = button("Diagnóstico", this::showDiagnostics);
         diag.setTag("diag");
         checklist.addView(diag, buttonParams());
+        if (director.connected()) {
+            Button full = button("Restablecer apps a pantalla completa", director::resetAllToFullscreen);
+            full.setTag("full");
+            checklist.addView(full, buttonParams());
+            checklist.addView(small("Úsalo si alguna app se abre pequeña o con un marco raro fuera de MultiPantalla."));
+        }
     }
 
     private void tagFirst(View row, boolean isFirst) {

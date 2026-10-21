@@ -41,5 +41,5 @@ jobs:
           gh release delete latest --yes --cleanup-tag || true
           gh release create latest MultiPantallaTV.apk \
             --title "MultiPantalla TV (compilación ${{ github.run_number }})" \
-            --notes "Versión 0.2.${{ github.run_number }} · commit ${{ github.sha }}" \
+            --notes "Versión 0.3.${{ github.run_number }} · commit ${{ github.sha }}" \
             --latest

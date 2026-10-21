@@ -423,8 +423,6 @@ public class TeclasService extends AccessibilityService implements Director.List
                 () -> director.toggleFullscreen(a), true, false));
         menuItems.add(new MenuItem("Diseño: " + Layouts.NAMES[director.layout] + "  (OK cambia)",
                 director::cycleLayout, false, false));
-        menuItems.add(new MenuItem(director.noPause ? "Permitir que se pausen entre sí"
-                : "Evitar que se pausen entre sí (experimental)", director::toggleNoPause, false, false));
         menuItems.add(new MenuItem("Cambiar apps (abrir MultiPantalla)", director::openPanel, true, false));
         menuItems.add(new MenuItem("Cerrar todo", () -> {
             director.stopSession();

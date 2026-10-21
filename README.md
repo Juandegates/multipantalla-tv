@@ -13,7 +13,9 @@ etc.) en 2, 3 o 4 ventanas, con control, volumen y pausa por ventana.
   cada app (la misma API que usa el volumen por app de MIUI). Android 13+.
 - **Pausa por ventana:** usa la sesión multimedia de la app; si no tiene,
   pausa sus reproductores de audio.
-- **Silenciar:** `appops PLAY_AUDIO`.
+- **Silenciar:** `appops PLAY_AUDIO deny` / `allow`.
+  Ojo: en `PLAY_AUDIO` y `TAKE_AUDIO_FOCUS` el modo `default` equivale a
+  **negado** (la app queda muda). Siempre se restaura con `allow`.
 
 ## Controles
 

@@ -85,9 +85,10 @@ public final class Director {
     public final Slot[] slots = new Slot[Layouts.MAX_SLOTS];
     public int layout;
     public volatile boolean sessionActive;
+    /** Mientras se abren las apps (para no volver al panel antes de tiempo). */
+    public volatile boolean starting;
     public int active = -1;
     public int fullscreenSlot = -1;
-    public boolean noPause;
     public int keyNext;
     public int keyPrev;
     public int keyMenu;
@@ -237,11 +238,86 @@ public final class Director {
         }
         try {
             binding = true;
+            bindStartedAt = SystemClock.uptimeMillis();
+            wakeShizukuApp();
             Shizuku.bindUserService(serviceArgs, connection);
+            main.removeCallbacks(bindWatchdog);
+            main.postDelayed(bindWatchdog, 9000);
         } catch (Throwable t) {
             binding = false;
             say("Error al conectar con Shizuku: " + t.getMessage());
         }
+        notifyChanged();
+    }
+
+    private long bindStartedAt;
+    private android.content.ContentProviderClient shizukuProvider;
+
+    /**
+     * Shizuku necesita que su propia app esté viva para entregarnos la conexión
+     * ("provider is null" en el registro). Pedir su proveedor la despierta sin abrir nada.
+     */
+    private void wakeShizukuApp() {
+        try {
+            if (shizukuProvider == null) {
+                shizukuProvider = context.getContentResolver()
+                        .acquireUnstableContentProviderClient(SHIZUKU_PACKAGE + ".shizuku");
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    public boolean bindingSlow() {
+        return binding && SystemClock.uptimeMillis() - bindStartedAt > 8000;
+    }
+
+    /** Si no conectó, se abre Shizuku un momento (eso siempre lo despierta) y se vuelve a intentar. */
+    private final Runnable bindWatchdog = () -> {
+        if (service == null && binding) {
+            notifyChanged();
+        }
+    };
+
+    /** Botón Reintentar: cancela el intento colgado y conecta de nuevo. */
+    public void retryBind(boolean openShizuku) {
+        try {
+            Shizuku.unbindUserService(serviceArgs, connection, true);
+        } catch (Throwable ignored) {
+        }
+        binding = false;
+        service = null;
+        if (shizukuProvider != null) {
+            try {
+                shizukuProvider.close();
+            } catch (Throwable ignored) {
+            }
+            shizukuProvider = null;
+        }
+        if (openShizuku) {
+            try {
+                PackageManager pm = context.getPackageManager();
+                android.content.Intent i = pm.getLeanbackLaunchIntentForPackage(SHIZUKU_PACKAGE);
+                if (i == null) {
+                    i = pm.getLaunchIntentForPackage(SHIZUKU_PACKAGE);
+                }
+                if (i != null) {
+                    i.addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK);
+                    context.startActivity(i);
+                    // Volver a MultiPantalla y conectar.
+                    main.postDelayed(() -> {
+                        android.content.Intent back = new android.content.Intent(context, MainActivity.class)
+                                .addFlags(android.content.Intent.FLAG_ACTIVITY_NEW_TASK
+                                        | android.content.Intent.FLAG_ACTIVITY_REORDER_TO_FRONT);
+                        context.startActivity(back);
+                        tryBind();
+                    }, 2500);
+                    notifyChanged();
+                    return;
+                }
+            } catch (Throwable ignored) {
+            }
+        }
+        tryBind();
     }
 
     private final ServiceConnection connection = new ServiceConnection() {
@@ -253,7 +329,9 @@ public final class Director {
                 return;
             }
             service = IMultiService.Stub.asInterface(binder);
+            main.removeCallbacks(bindWatchdog);
             refreshFreeform();
+            repairAudio();
             notifyChanged();
         }
 
@@ -396,6 +474,8 @@ public final class Director {
             return;
         }
         final int count = Layouts.slots(layout);
+        starting = true;
+        notifyChanged();
         work.execute(() -> {
             // Cerrar primero: así cada app nace como ventana libre y no en pantalla completa.
             for (int i = 0; i < slots.length; i++) {
@@ -404,8 +484,7 @@ public final class Director {
                 s.volume = 100;
                 s.muted = false;
                 if (s.pkg != null) {
-                    exec("am force-stop " + s.pkg + "; cmd appops set " + s.pkg + " PLAY_AUDIO default; "
-                            + "cmd appops set " + s.pkg + " TAKE_AUDIO_FOCUS default");
+                    exec("am force-stop " + s.pkg + "; " + audioAllow(s.pkg));
                 }
             }
             SystemClock.sleep(300);
@@ -438,9 +517,9 @@ public final class Director {
             final int firstSlot = first;
             final String errors = problems.toString();
             main.post(() -> {
+                starting = false;
                 sessionActive = firstSlot >= 0;
                 fullscreenSlot = -1;
-                noPause = false;
                 message = errors.isEmpty() ? "Listo. " + keyName(keyNext) + "/" + keyName(keyPrev)
                         + " cambia de ventana · " + keyName(keyMenu) + " abre el menú."
                         : "Algunas apps no abrieron:\n" + errors;
@@ -470,6 +549,44 @@ public final class Director {
                 restoreAudio(pkg);
                 exec("am force-stop " + pkg);
             }
+            resetToFullscreen(pkgs);
+        });
+    }
+
+    /**
+     * Android recuerda el tamaño de ventana de cada app (por eso después abrían
+     * pequeñas o con un marco raro). Abrirlas un instante en pantalla completa
+     * hace que recuerde "pantalla completa".
+     */
+    private void resetToFullscreen(List<String> pkgs) {
+        for (String pkg : pkgs) {
+            exec("am start --windowingMode 1 -a android.intent.action.MAIN -c android.intent.category.LEANBACK_LAUNCHER -p "
+                    + pkg + " >/dev/null 2>&1 || am start --windowingMode 1 -a android.intent.action.MAIN "
+                    + "-c android.intent.category.LAUNCHER -p " + pkg + " >/dev/null 2>&1");
+            SystemClock.sleep(1500);
+            exec("am force-stop " + pkg);
+        }
+        exec("am start -n " + BuildConfig.APPLICATION_ID + "/.MainActivity");
+    }
+
+    /** Botón de Ayuda: deja todas las apps elegidas abriendo en pantalla completa. */
+    public void resetAllToFullscreen() {
+        if (service == null) {
+            return;
+        }
+        final List<String> pkgs = new ArrayList<>();
+        for (Slot s : slots) {
+            if (s.pkg != null && !pkgs.contains(s.pkg)) {
+                pkgs.add(s.pkg);
+            }
+        }
+        say("Restableciendo pantalla completa…");
+        work.execute(() -> {
+            for (String pkg : pkgs) {
+                exec(audioAllow(pkg));
+            }
+            resetToFullscreen(pkgs);
+            say("Listo: esas apps vuelven a abrir en pantalla completa.");
         });
     }
 
@@ -482,7 +599,42 @@ public final class Director {
             s.setAppVolume(pkg, 1f);
         } catch (Exception ignored) {
         }
-        exec("cmd appops set " + pkg + " PLAY_AUDIO default; cmd appops set " + pkg + " TAKE_AUDIO_FOCUS default");
+        exec(audioAllow(pkg));
+    }
+
+    /**
+     * Ojo: en PLAY_AUDIO y TAKE_AUDIO_FOCUS el modo "default" NO es "normal":
+     * Android lo trata como negado (la app queda muda y no puede pedir el audio).
+     * Por eso siempre se deja en "allow".
+     */
+    private static String audioAllow(String pkg) {
+        return "cmd appops set " + pkg + " PLAY_AUDIO allow; cmd appops set " + pkg + " TAKE_AUDIO_FOCUS allow";
+    }
+
+    /** Arregla apps que quedaron con el audio en "default", "ignore" o "deny" (versiones 0.1 y 0.2). */
+    public void repairAudio() {
+        final List<String> pkgs = new ArrayList<>();
+        for (Slot s : slots) {
+            if (s.pkg != null && !pkgs.contains(s.pkg) && !(s.running() && s.muted)) {
+                pkgs.add(s.pkg);
+            }
+        }
+        if (pkgs.isEmpty()) {
+            return;
+        }
+        work.execute(() -> {
+            List<String> fixed = new ArrayList<>();
+            for (String pkg : pkgs) {
+                String out = exec("cmd appops get " + pkg + " PLAY_AUDIO; cmd appops get " + pkg + " TAKE_AUDIO_FOCUS");
+                if (out.contains(": default") || out.contains(": ignore") || out.contains(": deny")) {
+                    exec(audioAllow(pkg));
+                    fixed.add(pkg);
+                }
+            }
+            if (!fixed.isEmpty()) {
+                say("Reparé el audio de: " + String.join(", ", fixed));
+            }
+        });
     }
 
     /** Revisa qué ventanas siguen abiertas (el usuario pudo cerrar alguna con Atrás). */
@@ -670,19 +822,6 @@ public final class Director {
         });
     }
 
-    /** Evita (experimental) que una app pause a las demás al empezar a sonar. */
-    public void toggleNoPause() {
-        noPause = !noPause;
-        final boolean on = noPause;
-        for (final Slot s : slots) {
-            if (s.running()) {
-                work.execute(() -> exec("cmd appops set " + s.pkg + " TAKE_AUDIO_FOCUS " + (on ? "ignore" : "default")));
-            }
-        }
-        say(on ? "Las apps ya no pedirán el audio solo para ellas. Si alguna deja de reproducir, desactívalo."
-                : "Audio normal: una app puede pausar a otra al empezar.");
-    }
-
     public void toggleFullscreen(final int i) {
         final Slot s = slots[i];
         if (!s.running()) {
@@ -782,7 +921,17 @@ public final class Director {
                 }
                 sb.append("Último error: ").append(s.lastError()).append("\n\n");
                 sb.append(s.audioInfo()).append("\n\n");
-                sb.append(s.exec("dumpsys activity activities | grep -E '\\* Task\\{' | head -12"));
+                sb.append(s.exec("dumpsys activity activities | grep -E '\\* Task\\{' | head -12")).append("\n\n");
+                for (Slot sl : slots) {
+                    if (sl.pkg != null && sl.running()) {
+                        sb.append(sl.name).append(" permisos: ")
+                                .append(s.exec("cmd appops get " + sl.pkg + " PLAY_AUDIO | sed 's/;.*//'; "
+                                        + "cmd appops get " + sl.pkg + " TAKE_AUDIO_FOCUS | sed 's/;.*//'").replace('\n', ' '))
+                                .append('\n');
+                        sb.append(s.exec("dumpsys window windows | grep -A40 'Window{.*" + sl.pkg
+                                + "' | grep -m3 -E 'mFrame|frame=|mRequestedWidth|surface'")).append('\n');
+                    }
+                }
             } catch (Exception e) {
                 sb.append("Error: ").append(e.getMessage());
             }

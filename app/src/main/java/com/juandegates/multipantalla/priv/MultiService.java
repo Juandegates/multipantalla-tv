@@ -142,6 +142,23 @@ public class MultiService extends IMultiService.Stub {
         String pkg = cn.getPackageName();
         StringBuilder notes = new StringBuilder();
 
+        String first = launchOnce(cn, left, top, right, bottom, notes);
+        if (!first.startsWith("ok:")) {
+            return first;
+        }
+        // Algunas apps (YouTube) solo acomodan su imagen al tamaño con el que nacen.
+        // Android recuerda el último tamaño de cada app, así que al cerrarla y
+        // abrirla otra vez ya nace del tamaño correcto (sin quedar cortada).
+        SystemClock.sleep(700);
+        exec("am force-stop " + pkg);
+        SystemClock.sleep(400);
+        String second = launchOnce(cn, left, top, right, bottom, notes);
+        return second.startsWith("ok:") ? second : first;
+    }
+
+    private String launchOnce(ComponentName cn, int left, int top, int right, int bottom, StringBuilder notes) {
+        String pkg = cn.getPackageName();
+        int task = -1;
         // 1) Con opciones de arranque: la app nace ya con su tamaño final.
         try {
             Intent intent = new Intent(Intent.ACTION_MAIN)
@@ -153,11 +170,10 @@ public class MultiService extends IMultiService.Stub {
             setMode.invoke(options, WINDOWING_MODE_FREEFORM);
             int result = startActivityAsShell(intent, options.toBundle());
             if (result >= 0) {
-                int task = waitForTask(pkg, 4000);
-                if (task >= 0) {
-                    return "ok:" + task;
+                task = waitForTask(pkg, 4000);
+                if (task < 0) {
+                    notes.append("arrancó pero no encontré su ventana; ");
                 }
-                notes.append("arrancó pero no encontré su ventana; ");
             } else {
                 notes.append("startActivity=").append(result).append("; ");
             }
@@ -165,19 +181,26 @@ public class MultiService extends IMultiService.Stub {
             notes.append("opciones: ").append(shortError(t)).append("; ");
         }
 
-        // 2) Plan B: el comando "am" y luego ajustar el tamaño.
-        String out = exec("am start --windowingMode " + WINDOWING_MODE_FREEFORM
-                + " -n " + cn.flattenToShortString());
-        if (out.contains("Error") || out.contains("Exception")) {
-            lastError = notes + out;
-            return "error:" + lastError;
-        }
-        int task = waitForTask(pkg, 4000);
+        // 2) Plan B: el comando "am".
         if (task < 0) {
-            lastError = notes + "no apareció la ventana de " + pkg;
-            return "error:" + lastError;
+            String out = exec("am start --windowingMode " + WINDOWING_MODE_FREEFORM
+                    + " -n " + cn.flattenToShortString());
+            if (out.contains("Error") || out.contains("Exception")) {
+                lastError = notes + out;
+                return "error:" + lastError;
+            }
+            task = waitForTask(pkg, 4000);
+            if (task < 0) {
+                lastError = notes + "no apareció la ventana de " + pkg;
+                return "error:" + lastError;
+            }
         }
+        // Siempre se acomoda después: la TV ignora el tamaño pedido al abrir.
+        SystemClock.sleep(300);
         resizeTask(task, left, top, right, bottom);
+        if (notes.length() > 0) {
+            lastError = notes.toString();
+        }
         return "ok:" + task;
     }
 
