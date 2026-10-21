@@ -24,7 +24,12 @@ Durante la sesión, en cualquier app:
 - **CH ▲ / CH ▼:** pasar el control a la ventana siguiente / anterior
   (aparece un borde naranja en la ventana activa).
 - **ⓘ:** menú rápido de la ventana activa: pausa, volumen (◀ ▶), silenciar,
-  que solo suene esa, pantalla completa, cambiar diseño, cerrar todo.
+  que solo suene esa, pantalla completa, cambiar app, cambiar diseño, reporte, cerrar todo.
+- **Cuadros vacíos:** CH también pasa por ellos; con ⓘ → *Elegir app* se abre
+  una app ahí mismo sin volver al panel.
+
+Diseños: 2 lado a lado, 2 centradas 16:9, Grande + chica, 3 cuadros, 3 en fila,
+Grande + 2, Principal + 3 y 4 cuadros.
 
 **Salir:** presionar **Inicio** durante la sesión, o **Atrás** en el panel,
 cierra las ventanas, restaura audio y volumen y deja las apps en pantalla
@@ -32,6 +37,15 @@ completa. Fuera de la sesión el servicio de teclas no revisa ninguna tecla.
 
 Las teclas se pueden cambiar en **Asignar teclas**. El **Probador de teclas**
 muestra qué botones llegan a la app (algunos los usa la TV y no llegan).
+
+## Reporte para pruebas
+
+*Generar reporte* (panel o ⓘ) guarda `Descargas/MultiPantalla-reporte.txt` en la TV.
+Para pasarlo al celular con Termux:
+
+```
+adb pull /sdcard/Download/MultiPantalla-reporte.txt ~/ && cp ~/MultiPantalla-reporte.txt ~/storage/downloads/
+```
 
 ## Descarga
 

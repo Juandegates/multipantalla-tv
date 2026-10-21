@@ -505,33 +505,7 @@ public class MainActivity extends Activity implements Director.Listener {
     }
 
     private Map<String, ComponentName> listApps() {
-        PackageManager pm = getPackageManager();
-        List<ResolveInfo> found = new ArrayList<>();
-        found.addAll(pm.queryIntentActivities(new Intent(Intent.ACTION_MAIN)
-                .addCategory(Intent.CATEGORY_LEANBACK_LAUNCHER), 0));
-        found.addAll(pm.queryIntentActivities(new Intent(Intent.ACTION_MAIN)
-                .addCategory(Intent.CATEGORY_LAUNCHER), 0));
-        Map<String, ComponentName> byPackage = new LinkedHashMap<>();
-        Map<String, String> labels = new LinkedHashMap<>();
-        for (ResolveInfo ri : found) {
-            String pkg = ri.activityInfo.packageName;
-            if (pkg.equals(getPackageName()) || pkg.equals(Director.SHIZUKU_PACKAGE) || byPackage.containsKey(pkg)) {
-                continue;
-            }
-            byPackage.put(pkg, new ComponentName(pkg, ri.activityInfo.name));
-            labels.put(pkg, String.valueOf(ri.loadLabel(pm)));
-        }
-        List<String> pkgs = new ArrayList<>(byPackage.keySet());
-        pkgs.sort((a, b) -> labels.get(a).compareToIgnoreCase(labels.get(b)));
-        Map<String, ComponentName> result = new LinkedHashMap<>();
-        for (String pkg : pkgs) {
-            String label = labels.get(pkg);
-            if (result.containsKey(label)) {
-                label = label + " (" + pkg + ")";
-            }
-            result.put(label, byPackage.get(pkg));
-        }
-        return result;
+        return director.listApps();
     }
 
     // ------------------------------------------------------------------ teclas

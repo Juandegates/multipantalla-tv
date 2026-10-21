@@ -120,7 +120,8 @@ public final class Director {
                 }
             }
         }
-        layout = Layouts.clamp(prefs.getInt("layout", 4));
+        // Clave nueva: los diseños cambiaron de orden en la 0.5.
+        layout = Layouts.clamp(prefs.getInt("layout_v2", 0));
         keyNext = prefs.getInt("key_next", DEFAULT_KEY_NEXT);
         keyPrev = prefs.getInt("key_prev", DEFAULT_KEY_PREV);
         keyMenu = prefs.getInt("key_menu", DEFAULT_KEY_MENU);
@@ -551,7 +552,7 @@ public final class Director {
 
     public void setLayout(int newLayout) {
         layout = Layouts.clamp(newLayout);
-        prefs.edit().putInt("layout", layout).apply();
+        prefs.edit().putInt("layout_v2", layout).apply();
         if (sessionActive) {
             applyLayoutLive();
         }
@@ -876,15 +877,25 @@ public final class Director {
         return -1;
     }
 
+    /** Siguiente cuadro del diseño, con app o vacío (para poder elegir app en los vacíos). */
+    private int nextSlot(int from, int step) {
+        int n = Layouts.slots(layout);
+        if (n <= 0) {
+            return -1;
+        }
+        int start = from < 0 ? (step > 0 ? -1 : 0) : from;
+        return ((start + step) % n + n) % n;
+    }
+
     public void focusNext() {
-        int i = nextRunning(active < 0 ? -1 : active, 1);
+        int i = nextSlot(active, 1);
         if (i >= 0) {
             focusSlot(i);
         }
     }
 
     public void focusPrev() {
-        int i = nextRunning(active < 0 ? 0 : active, -1);
+        int i = nextSlot(active, -1);
         if (i >= 0) {
             focusSlot(i);
         }
@@ -893,6 +904,10 @@ public final class Director {
     public void focusSlot(final int i) {
         final Slot s = slots[i];
         if (!s.running()) {
+            // Cuadro vacío: solo se marca (con ⓘ se elige qué abrir ahí).
+            log("Control a cuadro " + (i + 1) + " (vacío)");
+            active = i;
+            notifyChanged();
             return;
         }
         log("Control a cuadro " + (i + 1) + " (" + s.name + ", ventana " + s.taskId + ")");
@@ -1064,29 +1079,114 @@ public final class Director {
     private void applyLayoutLive() {
         fullscreenSlot = -1;
         final int count = Layouts.slots(layout);
+        if (active >= count) {
+            active = -1;
+        }
         work.execute(() -> {
-            // Las ventanas abiertas se acomodan en orden en los cuadros del diseño nuevo.
-            int target = 0;
-            for (Slot s : slots) {
+            // Cada ventana se queda en su número de cuadro; las que no caben se cierran.
+            for (int i = 0; i < slots.length; i++) {
+                Slot s = slots[i];
                 if (!s.running()) {
                     continue;
                 }
-                if (target >= count) {
+                if (i >= count) {
+                    log("Diseño sin lugar para " + s.name + ": se cierra");
                     restoreAudio(s.pkg);
                     exec("am force-stop " + s.pkg);
                     s.taskId = -1;
                     continue;
                 }
-                Rect r = Layouts.bounds(layout, target, screenW, screenH);
+                Rect r = Layouts.bounds(layout, i, screenW, screenH);
                 s.bounds = r;
                 try {
                     service.resizeTask(s.taskId, r.left, r.top, r.right, r.bottom);
                 } catch (Exception ignored) {
                 }
-                target++;
             }
             notifyChanged();
         });
+    }
+
+    /** Lista de apps que se pueden abrir: nombre visible → componente. */
+    public java.util.Map<String, ComponentName> listApps() {
+        PackageManager pm = context.getPackageManager();
+        List<android.content.pm.ResolveInfo> found = new ArrayList<>();
+        found.addAll(pm.queryIntentActivities(new android.content.Intent(android.content.Intent.ACTION_MAIN)
+                .addCategory(android.content.Intent.CATEGORY_LEANBACK_LAUNCHER), 0));
+        found.addAll(pm.queryIntentActivities(new android.content.Intent(android.content.Intent.ACTION_MAIN)
+                .addCategory(android.content.Intent.CATEGORY_LAUNCHER), 0));
+        java.util.Map<String, ComponentName> byPackage = new java.util.LinkedHashMap<>();
+        java.util.Map<String, String> labels = new java.util.LinkedHashMap<>();
+        for (android.content.pm.ResolveInfo ri : found) {
+            String pkg = ri.activityInfo.packageName;
+            if (pkg.equals(context.getPackageName()) || pkg.equals(SHIZUKU_PACKAGE) || byPackage.containsKey(pkg)) {
+                continue;
+            }
+            byPackage.put(pkg, new ComponentName(pkg, ri.activityInfo.name));
+            labels.put(pkg, String.valueOf(ri.loadLabel(pm)));
+        }
+        List<String> pkgs = new ArrayList<>(byPackage.keySet());
+        pkgs.sort((a, b) -> labels.get(a).compareToIgnoreCase(labels.get(b)));
+        java.util.Map<String, ComponentName> result = new java.util.LinkedHashMap<>();
+        for (String pkg : pkgs) {
+            String label = labels.get(pkg);
+            if (result.containsKey(label)) {
+                label = label + " (" + pkg + ")";
+            }
+            result.put(label, byPackage.get(pkg));
+        }
+        return result;
+    }
+
+    /**
+     * Abre (o cambia) la app de un cuadro con la sesión en marcha.
+     * @return mensaje de error, o null si se aceptó.
+     */
+    public String openInSlot(final int i, final ComponentName component, final String name) {
+        if (!sessionActive || service == null) {
+            return "No hay sesión activa.";
+        }
+        for (int k = 0; k < slots.length; k++) {
+            if (k != i && slots[k].running() && component.getPackageName().equals(slots[k].pkg)) {
+                return name + " ya está en el cuadro " + (k + 1) + ". Android solo deja una ventana por app.";
+            }
+        }
+        final Slot s = slots[i];
+        final String oldPkg = s.running() ? s.pkg : null;
+        setSlotApp(i, component, name);
+        s.taskId = -1;
+        s.volume = 100;
+        s.muted = false;
+        final Rect b = fullscreenSlot == i ? new Rect(0, 0, screenW, screenH) : boundsOf(i);
+        s.bounds = b;
+        log("Abrir " + name + " en cuadro " + (i + 1) + " con la sesión en marcha"
+                + (oldPkg != null ? " (cambia " + oldPkg + ")" : ""));
+        say("Abriendo " + name + " en el cuadro " + (i + 1) + "…");
+        work.execute(() -> {
+            if (oldPkg != null) {
+                restoreAudio(oldPkg);
+                exec("am force-stop " + oldPkg);
+            }
+            exec("am force-stop " + component.getPackageName() + "; " + audioAllow(component.getPackageName()));
+            String r;
+            try {
+                r = service.launchFreeform(component.flattenToString(), b.left, b.top, b.right, b.bottom);
+            } catch (Exception e) {
+                r = "error:" + e.getMessage();
+            }
+            log("  → " + r);
+            final String result = r;
+            main.post(() -> {
+                if (result != null && result.startsWith("ok:")) {
+                    s.taskId = Integer.parseInt(result.substring(3));
+                    focusSlot(i);
+                } else {
+                    message = "No se pudo abrir " + name + ": " + result;
+                }
+                notifyChanged();
+            });
+        });
+        return null;
     }
 
     /** Abre la pantalla principal de MultiPantalla encima de todo. */

@@ -107,6 +107,8 @@ public class TeclasService extends AccessibilityService implements Director.List
     private FrameLayout menuRoot;
     private LinearLayout menuPanel;
     private boolean menuOpen;
+    /** true mientras el menú muestra la lista de apps para elegir. */
+    private boolean pickerMode;
     private int menuIndex;
     private final List<MenuItem> menuItems = new ArrayList<>();
 
@@ -264,6 +266,9 @@ public class TeclasService extends AccessibilityService implements Director.List
                 break;
             case KeyEvent.KEYCODE_DPAD_LEFT:
             case KeyEvent.KEYCODE_DPAD_RIGHT:
+                if (pickerMode) {
+                    break;
+                }
                 if (item != null && item.isVolume && director.active >= 0) {
                     director.changeVolume(director.active, code == KeyEvent.KEYCODE_DPAD_RIGHT ? 10 : -10);
                     buildMenu();
@@ -289,7 +294,13 @@ public class TeclasService extends AccessibilityService implements Director.List
                 }
                 break;
             case KeyEvent.KEYCODE_BACK:
-                closeMenu();
+                if (pickerMode) {
+                    pickerMode = false;
+                    menuIndex = 0;
+                    buildMenu();
+                } else {
+                    closeMenu();
+                }
                 break;
             default:
                 if (code == director.keyMenu) {
@@ -382,8 +393,10 @@ public class TeclasService extends AccessibilityService implements Director.List
             return;
         }
         Director.Slot slot = director.slots[director.active];
-        String label = (director.active + 1) + " · " + (slot.name == null ? "" : slot.name)
-                + " · " + (slot.muted ? "silencio" : slot.volume + "%");
+        String label = slot.running()
+                ? (director.active + 1) + " · " + (slot.name == null ? "" : slot.name)
+                + " · " + (slot.muted ? "silencio" : slot.volume + "%")
+                : (director.active + 1) + " · vacío · " + Director.keyName(director.keyMenu) + " para elegir app";
         try {
             if (border == null) {
                 border = new BorderView(this);
@@ -452,6 +465,7 @@ public class TeclasService extends AccessibilityService implements Director.List
             return;
         }
         menuIndex = 0;
+        pickerMode = false;
         menuOpen = true;
         main.removeCallbacks(hideBorderLater);
         updateBorder();
@@ -467,6 +481,7 @@ public class TeclasService extends AccessibilityService implements Director.List
         }
         menuRoot = null;
         menuPanel = null;
+        pickerMode = false;
         boolean wasOpen = menuOpen;
         menuOpen = false;
         if (wasOpen) {
@@ -485,6 +500,44 @@ public class TeclasService extends AccessibilityService implements Director.List
         }
         final Director.Slot slot = director.slots[a];
         menuItems.clear();
+        if (pickerMode) {
+            // Lista de apps: la elegida se abre en este cuadro.
+            for (java.util.Map.Entry<String, android.content.ComponentName> e : director.listApps().entrySet()) {
+                final String name = e.getKey();
+                final android.content.ComponentName cn = e.getValue();
+                menuItems.add(new MenuItem(name, () -> {
+                    String err = director.openInSlot(a, cn, name);
+                    if (err != null) {
+                        director.log("No se abrió: " + err);
+                    }
+                }, true, false));
+            }
+            if (menuIndex >= menuItems.size()) {
+                menuIndex = 0;
+            }
+            renderMenu();
+            return;
+        }
+        if (!slot.running()) {
+            menuItems.add(new MenuItem("Elegir app para este cuadro", () -> {
+                pickerMode = true;
+                menuIndex = 0;
+            }, false, false));
+            menuItems.add(new MenuItem("Diseño: " + Layouts.NAMES[director.layout] + "  (OK cambia)",
+                    director::cycleLayout, false, false));
+            menuItems.add(new MenuItem("Reacomodar ventanas", director::rearrange, true, false));
+            menuItems.add(new MenuItem("Generar reporte", () -> director.makeReport(r -> director.log("Reporte: " + r)),
+                    true, false));
+            menuItems.add(new MenuItem("Cerrar todo", () -> {
+                director.stopSession();
+                director.openPanel();
+            }, true, false));
+            if (menuIndex >= menuItems.size()) {
+                menuIndex = 0;
+            }
+            renderMenu();
+            return;
+        }
         menuItems.add(new MenuItem("Reproducir / Pausa", () -> director.togglePlay(a), false, false));
         menuItems.add(new MenuItem("Volumen: " + slot.volume + "%   ◀ ▶", () -> {
         }, false, true));
@@ -498,7 +551,11 @@ public class TeclasService extends AccessibilityService implements Director.List
                 true, false));
         menuItems.add(new MenuItem("Diseño: " + Layouts.NAMES[director.layout] + "  (OK cambia)",
                 director::cycleLayout, false, false));
-        menuItems.add(new MenuItem("Cambiar apps (abrir MultiPantalla)", director::openPanel, true, false));
+        menuItems.add(new MenuItem("Cambiar app de este cuadro", () -> {
+            pickerMode = true;
+            menuIndex = 0;
+        }, false, false));
+        menuItems.add(new MenuItem("Abrir panel de MultiPantalla", director::openPanel, true, false));
         menuItems.add(new MenuItem("Cerrar todo", () -> {
             director.stopSession();
             director.openPanel();
@@ -532,14 +589,22 @@ public class TeclasService extends AccessibilityService implements Director.List
 
         Director.Slot slot = director.slots[director.active];
         TextView title = new TextView(this);
-        title.setText("Ventana " + (director.active + 1) + " · " + (slot.name == null ? "" : slot.name));
+        title.setText(pickerMode ? "Elige la app para el cuadro " + (director.active + 1)
+                : "Cuadro " + (director.active + 1) + " · " + (slot.running() && slot.name != null ? slot.name : "vacío"));
         title.setTextColor(0xFFF5A524);
         title.setTextSize(18);
         title.setTypeface(Typeface.DEFAULT_BOLD);
         title.setPadding(dp(d, 6), 0, dp(d, 6), dp(d, 8));
         menuPanel.addView(title);
 
-        for (int i = 0; i < menuItems.size(); i++) {
+        // Solo se dibujan 10 opciones alrededor de la elegida (la lista de apps puede ser larga).
+        int visible = 10;
+        int first = Math.max(0, Math.min(menuIndex - visible / 2, menuItems.size() - visible));
+        int last = Math.min(menuItems.size(), first + visible);
+        if (first > 0) {
+            menuPanel.addView(small("▲ más"));
+        }
+        for (int i = first; i < last; i++) {
             TextView tv = new TextView(this);
             tv.setText(menuItems.get(i).label);
             tv.setTextSize(16);
@@ -555,8 +620,12 @@ public class TeclasService extends AccessibilityService implements Director.List
             }
             menuPanel.addView(tv);
         }
+        if (last < menuItems.size()) {
+            menuPanel.addView(small("▼ más"));
+        }
         TextView hint = new TextView(this);
-        hint.setText("▲▼ elegir · OK aplicar · ◀▶ otra ventana · Atrás cerrar");
+        hint.setText(pickerMode ? "▲▼ elegir · OK abrir aquí · Atrás regresar"
+                : "▲▼ elegir · OK aplicar · ◀▶ otro cuadro · Atrás cerrar");
         hint.setTextColor(0xFF8B90A0);
         hint.setTextSize(12);
         hint.setPadding(dp(d, 6), dp(d, 8), dp(d, 6), 0);
@@ -584,6 +653,15 @@ public class TeclasService extends AccessibilityService implements Director.List
             }
         } catch (Throwable ignored) {
         }
+    }
+
+    private TextView small(String text) {
+        TextView tv = new TextView(this);
+        tv.setText(text);
+        tv.setTextColor(0xFF8B90A0);
+        tv.setTextSize(12);
+        tv.setPadding(12, 2, 12, 2);
+        return tv;
     }
 
     private static int dp(float density, int v) {
