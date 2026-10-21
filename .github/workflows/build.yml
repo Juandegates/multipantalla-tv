@@ -1,0 +1,45 @@
+name: Compilar APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build
+  cancel-in-progress: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.14.3"
+
+      - name: Compilar
+        run: gradle :app:assembleDebug --no-daemon --stacktrace
+
+      - name: Preparar APK
+        run: cp app/build/outputs/apk/debug/app-debug.apk MultiPantallaTV.apk
+
+      # Siempre el mismo link: .../releases/download/latest/MultiPantallaTV.apk
+      - name: Publicar en Releases
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete latest --yes --cleanup-tag || true
+          gh release create latest MultiPantallaTV.apk \
+            --title "MultiPantalla TV (compilación ${{ github.run_number }})" \
+            --notes "Versión 0.1.${{ github.run_number }} · commit ${{ github.sha }}" \
+            --latest

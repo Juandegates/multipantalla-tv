@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Banner 16:9 para el menú de la TV: fondo oscuro con una cuadrícula 2x2. -->
+<vector xmlns:android="http://schemas.android.com/apk/res/android"
+    android:width="320dp"
+    android:height="180dp"
+    android:viewportWidth="320"
+    android:viewportHeight="180">
+    <path android:fillColor="#FF14161C" android:pathData="M0,0h320v180h-320z" />
+    <path android:fillColor="#FF2F7DF6" android:pathData="M92,32h64v52h-64z" />
+    <path android:fillColor="#FFE5484D" android:pathData="M164,32h64v52h-64z" />
+    <path android:fillColor="#FF30A46C" android:pathData="M92,92h64v52h-64z" />
+    <path android:fillColor="#FFF5A524" android:pathData="M164,92h64v52h-64z" />
+</vector>
