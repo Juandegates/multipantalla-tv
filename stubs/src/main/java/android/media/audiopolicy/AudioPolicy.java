@@ -25,7 +25,8 @@ public class AudioPolicy {
             throw new RuntimeException("stub");
         }
 
-        public Builder setAudioPolicyFocusListener(AudioPolicyFocusListener l) {
+        // En Android esta función no devuelve nada (no se puede encadenar).
+        public void setAudioPolicyFocusListener(AudioPolicyFocusListener l) {
             throw new RuntimeException("stub");
         }
 

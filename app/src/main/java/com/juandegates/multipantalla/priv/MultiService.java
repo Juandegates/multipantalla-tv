@@ -157,28 +157,34 @@ public class MultiService extends IMultiService.Stub {
         SystemClock.sleep(400);
         String second = launchOnce(cn, left, top, right, bottom, notes);
         String result = second.startsWith("ok:") ? second : first;
-        // Algunas apps tardan en arrancar y Android las vuelve a poner en su tamaño por
-        // defecto: se revisa varias veces que la ventana quedó en su lugar.
-        int task = Integer.parseInt(result.substring(3));
-        ensureBounds(task, left, top, right, bottom, 6000);
-        return result;
+        // Algunas apps (YouTube) abren primero una pantalla "puente" que se cierra sola y
+        // luego la real en OTRA ventana. Por eso cada vuelta se busca otra vez la ventana
+        // viva de la app y se revisa que quedó en su lugar.
+        int task = ensureBounds(pkg, Integer.parseInt(result.substring(3)), left, top, right, bottom, 8000);
+        return "ok:" + task;
     }
 
-    private void ensureBounds(int task, int left, int top, int right, int bottom, long timeoutMs) {
+    private int ensureBounds(String pkg, int task, int left, int top, int right, int bottom, long timeoutMs) {
         long end = SystemClock.uptimeMillis() + timeoutMs;
         int good = 0;
         while (SystemClock.uptimeMillis() < end) {
             SystemClock.sleep(500);
+            int current = findTask(pkg);
+            if (current >= 0 && current != task) {
+                task = current;
+                good = 0;
+            }
             int[] b = taskBounds(task);
             if (b.length == 4 && b[0] == left && b[1] == top && b[2] == right && b[3] == bottom) {
-                if (++good >= 2) {
-                    return;
+                if (++good >= 3) {
+                    return task;
                 }
             } else {
                 good = 0;
                 resizeTask(task, left, top, right, bottom);
             }
         }
+        return task;
     }
 
     @Override
@@ -767,10 +773,10 @@ public class MultiService extends IMultiService.Stub {
             return "ok";
         }
         try {
-            AudioPolicy policy = new AudioPolicy.Builder(ctx())
-                    .setAudioPolicyFocusListener(new ShareListener())
-                    .setIsAudioFocusPolicy(true)
-                    .build();
+            AudioPolicy.Builder builder = new AudioPolicy.Builder(ctx());
+            builder.setAudioPolicyFocusListener(new ShareListener());
+            builder.setIsAudioFocusPolicy(true);
+            AudioPolicy policy = builder.build();
             sharePolicy = policy;
             int r = (Integer) AudioManager.class.getMethod("registerAudioPolicy", AudioPolicy.class)
                     .invoke(audio, policy);
